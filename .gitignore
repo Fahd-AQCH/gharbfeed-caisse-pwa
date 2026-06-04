@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+dist/
+
+# Test coverage
+coverage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment secrets — NEVER commit
+.env*
+!.env.example
+
+# Claude Desktop / AI agent internals
+.agents/
+.antigravity/
+.claude/settings.local.json
+metadata.json
+
+# Firebase integration files (not part of this project)
+firebase-applet-config.json
+firebase-blueprint.json
+firebase.json
+firestore.rules
+
+# Debug / probe scripts generated during development
+probe_produits.cjs
+probe_produits.js
+probe_tables.cjs
+check_users.cjs
+read_transcript.cjs
+search_all.cjs
+setup_admin.cjs
