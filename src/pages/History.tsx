@@ -17,6 +17,7 @@ import {
   CornerUpLeft,
   BarChart2,
   DollarSign,
+  Tag,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import OperationDetailsModal from '../components/OperationDetailsModal';
@@ -111,7 +112,7 @@ function mapOperationRow(row: Record<string, unknown>): HistoryOperation {
   return {
     id,
     operationNumber: `OP-${id.padStart(4, '0')}`,
-    type: (row.type_op as 'vente' | 'achat' | 'retour_client') || 'vente',
+    type: (row.type_op as 'vente' | 'achat' | 'retour_client' | 'retour_fournisseur') || 'vente',
     clientId: row.client_id != null ? String(row.client_id) : undefined,
     userId: String(row.utilisateur_id ?? ''),
     status: normalizeStatus(row.statut as string | undefined),
@@ -165,11 +166,15 @@ export default function History({ profile }: HistoryProps) {
   );
 
   // Tabs
-  const [activeTab, setActiveTab] = useState<'operations' | 'mouvements'>('operations');
+  const [activeTab, setActiveTab] = useState<'operations' | 'mouvements' | 'prix'>('operations');
 
   // Mouvements de stock (tab 2)
   const [movements, setMovements] = useState<any[]>([]);
   const [loadingMovements, setLoadingMovements] = useState(false);
+
+  // Historique des prix (tab 3)
+  const [priceHistory, setPriceHistory] = useState<any[]>([]);
+  const [loadingPrix, setLoadingPrix] = useState(false);
 
   const fetchOperations = useCallback(async () => {
     if (!profile?.id) return;
@@ -355,6 +360,59 @@ export default function History({ profile }: HistoryProps) {
     fetchMovements();
   }, [profile?.id, activeTab, fetchMovements]);
 
+  const fetchPriceHistory = useCallback(async () => {
+    setLoadingPrix(true);
+    try {
+      const { data, error } = await supabase
+        .from('price_history')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(300);
+      if (error) throw error;
+
+      const agentIds = [...new Set((data || []).map((p: any) => p.utilisateur_id).filter(Boolean))];
+      const agentMap: Record<string, string> = {};
+      if (agentIds.length > 0) {
+        const { data: agents } = await supabase
+          .from('utilisateurs')
+          .select('id, username, nom')
+          .in('id', agentIds);
+        (agents || []).forEach((a: any) => { agentMap[a.id] = a.nom || a.username || '—'; });
+      }
+
+      const prodCodes = [...new Set((data || []).map((p: any) => p.produit_code).filter(Boolean))];
+      const prodMap: Record<string, string> = {};
+      if (prodCodes.length > 0) {
+        const { data: prods } = await supabase
+          .from('produits')
+          .select('code, produit')
+          .in('code', prodCodes as string[]);
+        (prods || []).forEach((p: any) => { prodMap[p.code] = p.produit; });
+      }
+
+      setPriceHistory((data || []).map((row: any) => ({
+        id: row.id,
+        produitCode: row.produit_code,
+        produitNom: prodMap[row.produit_code] || row.produit_code || '—',
+        typePrix: row.type_prix || 'vente',
+        ancienPrix: parseFloat(row.ancien_prix || 0),
+        nouveauPrix: parseFloat(row.nouveau_prix || 0),
+        agentName: row.utilisateur_id ? (agentMap[row.utilisateur_id] || '—') : '—',
+        dateModif: row.date_modif || '',
+        heureModif: row.heure_modif || '',
+      })));
+    } catch (err) {
+      console.error('[History] fetchPriceHistory:', err);
+    } finally {
+      setLoadingPrix(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!profile?.id || activeTab !== 'prix') return;
+    fetchPriceHistory();
+  }, [profile?.id, activeTab, fetchPriceHistory]);
+
   const handleExportXLSX = () => {
     const rows = filtered.map((op) => ({
       Date: op.createdAt?.toDate?.()?.toLocaleDateString('fr-FR') ?? 'N/A',
@@ -364,7 +422,7 @@ export default function History({ profile }: HistoryProps) {
           minute: '2-digit',
         }) ?? '',
       Numéro: op.operationNumber,
-      Type: op.type === 'retour_client' ? 'Avoir / Retour' : op.type,
+      Type: op.type === 'retour_client' ? 'Avoir / Retour' : op.type === 'retour_fournisseur' ? 'Retour Fournisseur' : op.type,
       Articles: op.items.length > 0
         ? op.items.map(i => `${i.productName || i.productId} (x${i.quantity})`).join(', ')
         : op.productSummary,
@@ -573,6 +631,14 @@ export default function History({ profile }: HistoryProps) {
             <BarChart2 className="h-3.5 w-3.5" />
             Stock
           </button>
+          <button
+            onClick={() => setActiveTab('prix')}
+            className={cn('flex items-center gap-2 px-5 py-2 text-sm font-bold rounded-lg transition-all',
+              activeTab === 'prix' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500 hover:text-slate-700')}
+          >
+            <Tag className="h-3.5 w-3.5" />
+            Prix
+          </button>
         </div>
 
         {activeTab === 'operations' && (
@@ -764,10 +830,12 @@ export default function History({ profile }: HistoryProps) {
                               <div className={cn('p-1.5 rounded-lg shrink-0',
                                 op.type === 'vente' ? 'bg-emerald-50 text-emerald-600'
                                 : op.type === 'retour_client' ? 'bg-purple-50 text-purple-600'
+                                : op.type === 'retour_fournisseur' ? 'bg-orange-50 text-orange-600'
                                 : 'bg-blue-50 text-blue-600'
                               )}>
                                 {op.type === 'vente' ? <TrendingUp className="h-3.5 w-3.5" />
                                   : op.type === 'retour_client' ? <CornerUpLeft className="h-3.5 w-3.5" />
+                                  : op.type === 'retour_fournisseur' ? <CornerUpLeft className="h-3.5 w-3.5" />
                                   : <TrendingDown className="h-3.5 w-3.5" />}
                               </div>
                               <div>
@@ -791,9 +859,12 @@ export default function History({ profile }: HistoryProps) {
                             <span className={cn('px-2 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-wider',
                               op.type === 'vente' ? 'bg-emerald-100 text-emerald-700'
                               : op.type === 'retour_client' ? 'bg-purple-100 text-purple-700'
+                              : op.type === 'retour_fournisseur' ? 'bg-orange-100 text-orange-700'
                               : 'bg-blue-100 text-blue-700'
                             )}>
-                              {op.type === 'retour_client' ? 'Avoir' : op.type}
+                              {op.type === 'retour_client' ? 'Avoir'
+                                : op.type === 'retour_fournisseur' ? 'Ret. Fourn.'
+                                : op.type}
                             </span>
                             {op.parentOpId != null && (
                               <p className="text-[9px] text-purple-500 font-bold mt-0.5">
@@ -946,30 +1017,125 @@ export default function History({ profile }: HistoryProps) {
                             <div className={cn('p-1.5 rounded-md',
                               m.type === 'vente' ? 'bg-rose-50 text-rose-600'
                               : m.type === 'retour_client' ? 'bg-purple-50 text-purple-600'
+                              : m.type === 'retour_fournisseur' ? 'bg-orange-50 text-orange-600'
                               : 'bg-emerald-50 text-emerald-600'
                             )}>
                               {m.type === 'vente' ? <TrendingDown className="h-3 w-3" />
                                 : m.type === 'retour_client' ? <CornerUpLeft className="h-3 w-3" />
+                                : m.type === 'retour_fournisseur' ? <TrendingDown className="h-3 w-3" />
                                 : <TrendingUp className="h-3 w-3" />}
                             </div>
                             <span className="font-bold uppercase tracking-wider text-xs text-slate-700">
-                              {m.type === 'retour_client' ? 'Avoir' : m.type}
+                              {m.type === 'retour_client' ? 'Avoir'
+                                : m.type === 'retour_fournisseur' ? 'Ret. Fourn.'
+                                : m.type}
                             </span>
                           </div>
                         </td>
                         <td className="px-6 py-3 font-black text-right">
                           <span className={
-                            m.type === 'vente' ? 'text-rose-600'
+                            (m.type === 'vente' || m.type === 'retour_fournisseur') ? 'text-rose-600'
                             : m.type === 'retour_client' ? 'text-purple-600'
                             : 'text-emerald-600'
                           }>
-                            {m.type === 'vente' ? '−' : '+'}
+                            {(m.type === 'vente' || m.type === 'retour_fournisseur') ? '−' : '+'}
                             {m.quantity}
                           </span>
                         </td>
                         <td className="px-6 py-3 font-black text-slate-800 text-right">{m.afterQty}</td>
                       </tr>
                     ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ── Tab 3: Historique des prix ── */}
+        {activeTab === 'prix' && (
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200">
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase tracking-widest text-[10px]">Date</th>
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase tracking-widest text-[10px]">Produit</th>
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase tracking-widest text-[10px]">Agent</th>
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase tracking-widest text-[10px]">Type Prix</th>
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase tracking-widest text-[10px] text-right">Ancien Prix</th>
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase tracking-widest text-[10px] text-right">Nouveau Prix</th>
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase tracking-widest text-[10px] text-right">Variation</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {loadingPrix ? (
+                    <tr>
+                      <td colSpan={7} className="px-6 py-20 text-center">
+                        <div className="flex items-center justify-center gap-3 text-slate-400 font-bold">
+                          <div className="h-5 w-5 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
+                          Chargement des modifications de prix...
+                        </div>
+                      </td>
+                    </tr>
+                  ) : priceHistory.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="px-6 py-20 text-center text-slate-400 font-bold">
+                        Aucune modification de prix enregistrée.
+                      </td>
+                    </tr>
+                  ) : (
+                    priceHistory.map((row) => {
+                      const delta = row.nouveauPrix - row.ancienPrix;
+                      const pct = row.ancienPrix > 0 ? ((delta / row.ancienPrix) * 100).toFixed(1) : '—';
+                      return (
+                        <tr key={row.id} className="hover:bg-slate-50 transition-colors">
+                          <td className="px-6 py-3">
+                            <p className="text-xs font-bold text-slate-900">
+                              {row.dateModif ? new Date(row.dateModif).toLocaleDateString('fr-FR') : '—'}
+                            </p>
+                            <p className="text-[10px] text-slate-400">
+                              {row.heureModif ? row.heureModif.slice(0, 5) : ''}
+                            </p>
+                          </td>
+                          <td className="px-6 py-3">
+                            <p className="font-bold text-slate-900 text-sm">{row.produitNom}</p>
+                            <p className="text-[10px] text-slate-400 font-mono">{row.produitCode}</p>
+                          </td>
+                          <td className="px-6 py-3 text-xs font-bold text-slate-600">
+                            {row.agentName}
+                          </td>
+                          <td className="px-6 py-3">
+                            <span className={cn(
+                              'px-2 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-wider',
+                              row.typePrix === 'vente' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'
+                            )}>
+                              {row.typePrix === 'vente' ? 'Vente' : 'Achat'}
+                            </span>
+                          </td>
+                          <td className="px-6 py-3 text-right font-bold text-slate-500 text-sm">
+                            {row.ancienPrix.toFixed(2)} DH
+                          </td>
+                          <td className="px-6 py-3 text-right font-black text-slate-900 text-sm">
+                            {row.nouveauPrix.toFixed(2)} DH
+                          </td>
+                          <td className="px-6 py-3 text-right">
+                            <span className={cn(
+                              'text-xs font-black',
+                              delta > 0 ? 'text-rose-600' : delta < 0 ? 'text-emerald-600' : 'text-slate-400'
+                            )}>
+                              {delta > 0 ? '▲' : delta < 0 ? '▼' : '='}{' '}
+                              {Math.abs(delta).toFixed(2)} DH
+                            </span>
+                            {pct !== '—' && (
+                              <p className={cn('text-[10px] font-bold', delta > 0 ? 'text-rose-400' : delta < 0 ? 'text-emerald-400' : 'text-slate-300')}>
+                                {delta >= 0 ? '+' : ''}{pct}%
+                              </p>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>

@@ -19,6 +19,7 @@ import {
   CornerUpLeft,
   ArrowLeft,
   Package,
+  Loader2,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -217,10 +218,12 @@ export default function Cashier({ profile }: CashierProps) {
 
   // Recherche intelligente : code prioritaire (exact > préfixe > contient) puis nom
   const filteredProducts = (() => {
-    if (!search.trim()) return products;
+    // Inactive products are never shown in the cashier view (for any role)
+    const activeProducts = products.filter((p) => p.isActive !== false);
+    if (!search.trim()) return activeProducts;
     const q = search.toLowerCase().trim();
     const normQ = q.replace(/\D/g, '').replace(/^0+/, '');
-    return products
+    return activeProducts
       .map((p) => {
         const code = p.code.toLowerCase();
         const normCode = p.code.replace(/\D/g, '').replace(/^0+/, '') || '0';
@@ -548,10 +551,6 @@ export default function Cashier({ profile }: CashierProps) {
       const timeStr = new Date().toTimeString().split(' ')[0];
       const isVente = operationType === 'vente';
 
-      // ── TVA inclusive 20% ─────────────────────────────────────────────────
-      const TVA_RATE = 0.20;
-      const montantTva = isVente ? parseFloat((finalTotal * TVA_RATE / (1 + TVA_RATE)).toFixed(2)) : 0;
-
       // ── Build header & items payloads ─────────────────────────────────────
       const header: Record<string, unknown> = {
         date_op:   todayStr,
@@ -572,7 +571,6 @@ export default function Cashier({ profile }: CashierProps) {
         date_echeance:  resteAPayer > 0.01 && dateEcheance ? dateEcheance : null,
         date_versement: conditionPaiement === 'Versement' && dateVersement ? dateVersement : null,
         statut_paiement: statutPaiement,
-        montant_tva:    montantTva,
         banque_cheque:  conditionPaiement === 'Chèque' ? (banqueCheque.trim() || null) : null,
         proprietaire_cheque: conditionPaiement === 'Chèque' ? (proprietaireCheque.trim() || null) : null,
         date_encaissement_cheque: conditionPaiement === 'Chèque' && dateEncaissementCheque ? dateEncaissementCheque : null,
@@ -655,7 +653,6 @@ export default function Cashier({ profile }: CashierProps) {
           grossTotal: grossTotal,
           discountAmount: discountGlobal,
           finalTotal: finalTotal,
-          montantTva: montantTva,
           montantPaye: resteAPayer > 0.01 ? Math.min(montantPayeNum, finalTotal) : undefined,
           resteAPayer: resteAPayer > 0.01 ? resteAPayer : undefined,
         };
@@ -1760,18 +1757,3 @@ export default function Cashier({ profile }: CashierProps) {
   );
 }
 
-const Loader2 = ({ className }: { className?: string }) => (
-  <svg
-    className={cn('animate-spin', className)}
-    xmlns="http://www.w3.org/2000/svg"
-    fill="none"
-    viewBox="0 0 24 24"
-  >
-    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-    <path
-      className="opacity-75"
-      fill="currentColor"
-      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-    />
-  </svg>
-);

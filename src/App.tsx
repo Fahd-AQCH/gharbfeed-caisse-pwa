@@ -16,6 +16,8 @@ import Inventory from './pages/Inventory';
 import Clients from './pages/Clients';
 import History from './pages/History';
 import Admin from './pages/Admin';
+import Fournisseurs from './pages/Fournisseurs';
+import Debts from './pages/Debts';
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
 import { AnimatePresence } from 'motion/react';
@@ -224,6 +226,8 @@ export default function App() {
                   <Route path="/inventory" element={<Inventory profile={profile} />} />
                   <Route path="/clients" element={<Clients profile={profile} />} />
                   <Route path="/history" element={<History profile={profile} />} />
+                  <Route path="/fournisseurs" element={<Fournisseurs profile={profile} />} />
+                  <Route path="/debts" element={<Debts profile={profile} />} />
                   <Route path="/admin" element={<Admin profile={profile} />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

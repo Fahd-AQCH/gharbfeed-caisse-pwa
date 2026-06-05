@@ -14,7 +14,7 @@ import {
   MoreVertical,
   ArrowUpRight,
   Edit2,
-  Trash2,
+  Power,
   X,
   CheckCircle2,
   ChevronUp,
@@ -56,6 +56,8 @@ export default function Inventory({ profile }: InventoryProps) {
   const [stockFilter, setStockFilter] = useState<'all' | 'low' | 'out' | 'ok'>('all');
   const [showFilters, setShowFilters] = useState(false);
   const [originalStockOnEdit, setOriginalStockOnEdit] = useState<number | null>(null);
+  const [originalPriceOnEdit, setOriginalPriceOnEdit] = useState<number | null>(null);
+  const [originalPdatOnEdit, setOriginalPdatOnEdit] = useState<number | null>(null);
 
   const isAdmin = profile?.roleId === 'admin';
 
@@ -165,6 +167,31 @@ export default function Inventory({ profile }: InventoryProps) {
           .update(updatePayload)
           .eq('code', editingProductId);
         if (error) throw error;
+
+        // ── Log price changes to price_history ────────────────────────────────
+        if (isAdmin) {
+          const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
+          const timeStr = new Date().toTimeString().split(' ')[0];
+          const changes: { typePrix: string; ancienPrix: number; nouveauPrix: number }[] = [];
+          if (originalPriceOnEdit !== null && Math.abs(newProduct.defaultPrice - originalPriceOnEdit) > 0.001) {
+            changes.push({ typePrix: 'vente', ancienPrix: originalPriceOnEdit, nouveauPrix: newProduct.defaultPrice });
+          }
+          if (originalPdatOnEdit !== null && Math.abs(newProduct.prixAchat - originalPdatOnEdit) > 0.001) {
+            changes.push({ typePrix: 'achat', ancienPrix: originalPdatOnEdit, nouveauPrix: newProduct.prixAchat });
+          }
+          for (const ch of changes) {
+            supabase.from('price_history').insert({
+              produit_code: editingProductId,
+              produit_nom: newProduct.name,
+              type_prix: ch.typePrix,
+              ancien_prix: ch.ancienPrix,
+              nouveau_prix: ch.nouveauPrix,
+              utilisateur_id: profile?.id,
+              date_modif: todayStr,
+              heure_modif: timeStr,
+            }).then(({ error: phErr }) => { if (phErr) console.error('[price_history]', phErr); });
+          }
+        }
       } else {
         const { error } = await supabase
           .from('produits')
@@ -187,6 +214,8 @@ export default function Inventory({ profile }: InventoryProps) {
       setShowAddModal(false);
       setEditingProductId(null);
       setOriginalStockOnEdit(null);
+      setOriginalPriceOnEdit(null);
+      setOriginalPdatOnEdit(null);
       fetchData();
       setNewProduct({
         code: "", name: "", description: "", unitId: "u", categoryId: "Matériel", defaultPrice: 0, prixAchat: 0, stockActual: 0, seuilAlerte: 10, isActive: true
@@ -200,6 +229,8 @@ export default function Inventory({ profile }: InventoryProps) {
   const handleEditClick = (product: Product) => {
     setEditingProductId(product.code);
     setOriginalStockOnEdit(product.stockActual);
+    setOriginalPriceOnEdit(product.defaultPrice);
+    setOriginalPdatOnEdit((product as any).purchasePrice ?? 0);
     setNewProduct({
       code: product.code,
       name: product.name,
@@ -215,21 +246,27 @@ export default function Inventory({ profile }: InventoryProps) {
     setShowAddModal(true);
   };
 
-  const handleDeleteProduct = async (productId: string) => {
-    if (!window.confirm("Êtes-vous sûr de vouloir supprimer ce produit ?")) return;
+  const handleToggleActive = async (product: Product) => {
+    const newState = !product.isActive;
+    const label = newState ? 'Réactiver' : 'Désactiver';
+    if (!window.confirm(`${label} le produit "${product.name}" ?`)) return;
     try {
       const { error } = await supabase
         .from('produits')
-        .delete()
-        .eq('code', productId);
+        .update({ is_active: newState })
+        .eq('code', product.code);
       if (error) throw error;
       fetchData();
     } catch (err) {
       console.error(err);
+      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
   const filteredProducts = products.filter(p => {
+    // Cashiers only see active products
+    if (!isAdmin && p.isActive === false) return false;
+
     const searchLower = search.toLowerCase();
     const matchesName = p.name.toLowerCase().includes(searchLower);
     const matchesCodeStrict = p.code.toLowerCase().includes(searchLower);
@@ -335,13 +372,15 @@ export default function Inventory({ profile }: InventoryProps) {
             <Download className="h-4 w-4" />
             Exporter Excel
           </button>
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 px-6 rounded-2xl flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all"
-          >
-            <Plus className="h-5 w-5" />
-            Nouveau Produit
-          </button>
+          {isAdmin && (
+            <button
+              onClick={() => setShowAddModal(true)}
+              className="bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 px-6 rounded-2xl flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all"
+            >
+              <Plus className="h-5 w-5" />
+              Nouveau Produit
+            </button>
+          )}
         </div>
       </div>
 
@@ -471,7 +510,7 @@ export default function Inventory({ profile }: InventoryProps) {
                 </thead>
                 <tbody className="text-sm divide-y divide-slate-50">
                   {sortedProducts.map((p) => (
-                    <tr key={p.id} className="hover:bg-slate-50/50 transition-colors">
+                    <tr key={p.id} className={cn('hover:bg-slate-50/50 transition-colors', !p.isActive && 'opacity-50')}>
                       {/* Code */}
                       <td className="px-6 py-4">
                         <span className="font-mono font-bold text-slate-500 text-xs bg-slate-100 px-2 py-1 rounded-lg">
@@ -525,14 +564,30 @@ export default function Inventory({ profile }: InventoryProps) {
                       </td>
                       {/* Actions */}
                       <td className="px-6 py-4">
-                        <div className="flex items-center space-x-2">
-                          <button onClick={() => handleEditClick(p)} className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all">
-                            <Edit2 className="h-4 w-4" />
-                          </button>
-                          <button onClick={() => handleDeleteProduct(p.id!)} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all">
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </div>
+                        {isAdmin ? (
+                          <div className="flex items-center space-x-1">
+                            <button
+                              onClick={() => handleEditClick(p)}
+                              className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all"
+                              title="Modifier"
+                            >
+                              <Edit2 className="h-4 w-4" />
+                            </button>
+                            <button
+                              onClick={() => handleToggleActive(p)}
+                              className={cn('p-2 rounded-lg transition-all',
+                                p.isActive
+                                  ? 'text-slate-400 hover:text-rose-600 hover:bg-rose-50'
+                                  : 'text-slate-400 hover:text-emerald-600 hover:bg-emerald-50'
+                              )}
+                              title={p.isActive ? 'Désactiver le produit' : 'Réactiver le produit'}
+                            >
+                              <Power className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-[10px] text-slate-300 font-medium">—</span>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -651,7 +706,7 @@ export default function Inventory({ profile }: InventoryProps) {
                   )}
                   <div className="space-y-2">
                     <label className="text-xs font-black text-slate-400 uppercase tracking-widest pl-1">
-                      Stock Initial
+                      Stock actuel
                       {editingProductId && !isAdmin && (
                         <span className="ml-2 text-amber-600 normal-case">(admin uniquement)</span>
                       )}

@@ -9,6 +9,8 @@ import {
   History,
   Settings,
   LogOut,
+  Building2,
+  CreditCard,
 } from 'lucide-react';
 import { UserProfile } from '../../types';
 import { cn } from '../../lib/utils';
@@ -21,8 +23,10 @@ interface SidebarProps {
 const menuItems = [
   { path: '/', label: 'Tableau de bord', icon: LayoutDashboard, roles: ['admin', 'supervisor', 'cashier', 'stock_manager'] },
   { path: '/cashier', label: 'Ventes / Caissier', icon: ShoppingCart, roles: ['admin', 'cashier', 'supervisor'] },
-  { path: '/inventory', label: 'État du Stock', icon: Package, roles: ['admin', 'stock_manager', 'supervisor'] },
+  { path: '/inventory', label: 'État du Stock', icon: Package, roles: ['admin', 'stock_manager', 'supervisor', 'cashier'] },
   { path: '/clients', label: 'Clients', icon: Users, roles: ['admin', 'cashier', 'supervisor'] },
+  { path: '/fournisseurs', label: 'Fournisseurs', icon: Building2, roles: ['admin', 'cashier', 'supervisor', 'stock_manager'] },
+  { path: '/debts', label: 'Gestion des Dettes', icon: CreditCard, roles: ['admin', 'cashier', 'supervisor'] },
   { path: '/history', label: 'Historique', icon: History, roles: ['admin', 'supervisor', 'cashier', 'stock_manager'] },
   { path: '/admin', label: 'Administration', icon: Settings, roles: ['admin'] },
 ];

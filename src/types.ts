@@ -51,7 +51,7 @@ export interface Category {
 export interface Operation {
   id: string;
   operationNumber: string;
-  type: 'vente' | 'achat' | 'retour_client';
+  type: 'vente' | 'achat' | 'retour_client' | 'retour_fournisseur';
   clientId?: string;
   userId: string;
   status: 'draft' | 'validated' | 'cancelled' | 'en_attente';
@@ -100,4 +100,32 @@ export interface AuditLog {
   entityId: string;
   details?: any;
   createdAt: any;
+}
+
+export interface DebtPayment {
+  id: number;
+  operationId: number;
+  montant: number;
+  datePaiement: string;
+  heurePaiement?: string;
+  conditionPaiement: string;
+  refPaiement?: string;
+  utilisateurId?: string;
+  agentName?: string;
+  notes?: string;
+  createdAt?: string;
+}
+
+export interface PriceHistoryEntry {
+  id: number;
+  produitCode: string;
+  produitNom?: string;
+  typePrix: 'vente' | 'achat';
+  ancienPrix: number;
+  nouveauPrix: number;
+  utilisateurId?: string;
+  agentName?: string;
+  dateModif?: string;
+  heureModif?: string;
+  createdAt?: string;
 }

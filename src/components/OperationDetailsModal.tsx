@@ -38,14 +38,25 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
 
   const isAdmin = profile?.roleId === 'admin';
 
+  const isAchat = operation.type === 'achat' || (operation as any).type_op === 'achat';
+
   const isPendingPurchase =
-    (operation.type === 'achat' || (operation as any).type_op === 'achat') &&
+    isAchat &&
     (operation.status === 'en_attente' || (operation as any).statut === 'en_attente');
 
-  const isRetour = operation.type === 'retour_client' || (operation as any).type_op === 'retour_client';
+  const isRetour =
+    operation.type === 'retour_client' || (operation as any).type_op === 'retour_client' ||
+    operation.type === 'retour_fournisseur' || (operation as any).type_op === 'retour_fournisseur';
+
+  const isRetourFournisseur =
+    operation.type === 'retour_fournisseur' || (operation as any).type_op === 'retour_fournisseur';
 
   const isValidatedSale =
     (operation.type === 'vente' || (operation as any).type_op === 'vente') &&
+    (operation.status === 'validated' || (operation.status as string) === 'valide');
+
+  const isValidatedAchat =
+    isAchat &&
     (operation.status === 'validated' || (operation.status as string) === 'valide');
 
   const grossTotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
@@ -309,25 +320,33 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
       return;
     }
     setCreatingReturn(true);
+
+    // Determine if this is a purchase return or a sale return
+    const returnForPurchase = isAchat;
+    const returnTypeOp = returnForPurchase ? 'retour_fournisseur' : 'retour_client';
+
     try {
       const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
       const timeStr = new Date().toTimeString().split(' ')[0];
       const total = toReturn.reduce((s, i) => s + i.returnQty * i.unitPrice, 0);
 
-      // 1. Créer l'opération retour_client
+      // 1. Créer l'opération retour
       const { data: returnOp, error: returnErr } = await supabase
         .from('operations')
         .insert({
           date_op: todayStr,
           heure_op: timeStr,
-          type_op: 'retour_client',
+          type_op: returnTypeOp,
           total_dh: total,
           remise_dh: 0,
           utilisateur_id: profile?.id,
-          client_id: (operation as any).clientId || (operation as any).client_id || null,
+          client_id: returnForPurchase ? null : ((operation as any).clientId || (operation as any).client_id || null),
+          fournisseur_id: returnForPurchase ? ((operation as any).fournisseur_id || null) : null,
           statut: 'valide',
           parent_op_id: parseInt(operation.id),
-          observ: `Avoir sur ${operation.operationNumber}`,
+          observ: returnForPurchase
+            ? `Retour fournisseur sur ${operation.operationNumber}`
+            : `Avoir sur ${operation.operationNumber}`,
           condition_paiement: 'Espèce',
         })
         .select()
@@ -335,7 +354,7 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
 
       if (returnErr) throw returnErr;
 
-      // 2. Insérer les lignes articles de l'avoir
+      // 2. Insérer les lignes articles
       const { error: itemsErr } = await supabase
         .from('operation_items')
         .insert(
@@ -349,37 +368,50 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
         );
       if (itemsErr) throw itemsErr;
 
-      // 3. Restock automatique
+      // 3. Mise à jour du stock
+      // • retour_client → RECRÉDITE le stock (on reprend la marchandise)
+      // • retour_fournisseur → DÉCRÉDITE le stock (on rend la marchandise)
       for (const item of toReturn) {
         try {
           const { data: prod } = await supabase
             .from('produits')
-            .select('stock_actuel, prix_vente, qte_vente')
+            .select('stock_actuel, prix_vente, qte_vente, qte_achat')
             .eq('code', item.productId)
             .single();
           if (prod) {
-            const newStock = parseFloat(prod.stock_actuel || 0) + item.returnQty;
+            const currentStock = parseFloat(prod.stock_actuel || 0);
             const price = parseFloat(prod.prix_vente || 0);
-            await supabase
-              .from('produits')
-              .update({
+
+            if (returnForPurchase) {
+              // Retour fournisseur: DECREASE stock
+              const newStock = Math.max(0, currentStock - item.returnQty);
+              await supabase.from('produits').update({
+                stock_actuel: newStock,
+                valeur_stock: newStock * price,
+                qte_achat: Math.max(0, parseFloat(prod.qte_achat || 0) - item.returnQty),
+              }).eq('code', item.productId);
+            } else {
+              // Retour client: INCREASE stock
+              const newStock = currentStock + item.returnQty;
+              await supabase.from('produits').update({
                 stock_actuel: newStock,
                 valeur_stock: newStock * price,
                 qte_vente: Math.max(0, parseFloat(prod.qte_vente || 0) - item.returnQty),
-              })
-              .eq('code', item.productId);
+              }).eq('code', item.productId);
+            }
           }
         } catch (e) {
-          console.error('[Return] restock failed:', item.productId, e);
+          console.error('[Return] stock update failed:', item.productId, e);
         }
       }
 
       setShowReturnPanel(false);
       onUpdate();
       onClose();
-      alert(`✅ Avoir OP-${String(returnOp.num_op).padStart(4, '0')} créé — stock recredité.`);
+      const label = returnForPurchase ? 'Retour fournisseur' : 'Avoir';
+      alert(`✅ ${label} OP-${String(returnOp.num_op).padStart(4, '0')} créé — stock mis à jour.`);
     } catch (err) {
-      alert('Erreur création avoir : ' + (err instanceof Error ? err.message : String(err)));
+      alert('Erreur création retour : ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setCreatingReturn(false);
     }
@@ -387,12 +419,15 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
 
   // ─── RENDER ───────────────────────────────────────────────────────────────
   const typeLabel =
-    isRetour ? 'Avoir / Retour' :
+    isRetourFournisseur ? 'Retour Fournisseur' :
+    isRetour ? 'Avoir / Retour Client' :
     operation.type === 'vente' ? 'Vente' :
     operation.type === 'achat' ? 'Achat' :
     operation.type;
 
-  const typeBadgeCn = isRetour
+  const typeBadgeCn = isRetourFournisseur
+    ? 'bg-blue-100 text-blue-700'
+    : isRetour
     ? 'bg-purple-100 text-purple-700'
     : operation.type === 'vente'
     ? 'bg-emerald-100 text-emerald-700'
@@ -478,12 +513,21 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
           </div>
         )}
 
-        {/* ── Bandeau avoir (retour_client) ── */}
-        {isRetour && (
+        {/* ── Bandeau retour_client ── */}
+        {isRetour && !isRetourFournisseur && (
           <div className="mx-6 mt-4 p-3 bg-purple-50 border border-purple-200 rounded-2xl flex items-center gap-3">
             <RotateCcw className="h-4 w-4 text-purple-500 shrink-0" />
             <p className="text-xs font-bold text-purple-700">
               Avoir / Retour client — le stock a été recrédité automatiquement lors de la création de cet avoir.
+            </p>
+          </div>
+        )}
+        {/* ── Bandeau retour_fournisseur ── */}
+        {isRetourFournisseur && (
+          <div className="mx-6 mt-4 p-3 bg-blue-50 border border-blue-200 rounded-2xl flex items-center gap-3">
+            <RotateCcw className="h-4 w-4 text-blue-500 shrink-0" />
+            <p className="text-xs font-bold text-blue-700">
+              Retour fournisseur — le stock a été décrémenté automatiquement lors de la création de ce retour.
             </p>
           </div>
         )}
@@ -516,10 +560,10 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                 </div>
                 <div>
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    {isPendingPurchase ? 'Fournisseur' : 'Client'}
+                    {isAchat ? 'Fournisseur' : 'Client'}
                   </p>
                   <p className="text-sm font-bold text-slate-900">
-                    {isPendingPurchase
+                    {isAchat
                       ? ((operation as any).fournisseurName || 'Aucun fournisseur renseigné')
                       : ((operation as any).clientName || 'Sans client')}
                   </p>
@@ -712,14 +756,24 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
               {/* Totaux + bouton Avoir */}
               <div className="flex justify-between items-start">
                 <div>
-                  {/* Bouton Créer un Avoir — ventes validées, admin seulement, pas sur un avoir */}
+                  {/* Bouton retour client — ventes validées, admin seulement */}
                   {isAdmin && isValidatedSale && !isRetour && !showReturnPanel && (
                     <button
                       onClick={openReturnPanel}
                       className="flex items-center gap-2 px-5 py-2.5 bg-purple-50 border border-purple-200 text-purple-700 font-black rounded-xl hover:bg-purple-100 transition-all text-sm"
                     >
                       <RotateCcw className="h-4 w-4" />
-                      Créer un Avoir / Retour
+                      Créer un Avoir / Retour client
+                    </button>
+                  )}
+                  {/* Bouton retour fournisseur — achats validés, admin seulement */}
+                  {isAdmin && isValidatedAchat && !isRetour && !showReturnPanel && (
+                    <button
+                      onClick={openReturnPanel}
+                      className="flex items-center gap-2 px-5 py-2.5 bg-blue-50 border border-blue-200 text-blue-700 font-black rounded-xl hover:bg-blue-100 transition-all text-sm"
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                      Créer un Retour Fournisseur
                     </button>
                   )}
                   {showReturnPanel && (
@@ -751,15 +805,19 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                 </div>
               </div>
 
-              {/* ── Panel Création Avoir ── */}
+              {/* ── Panel Création Retour ── */}
               {showReturnPanel && (
-                <div className="border-2 border-purple-200 rounded-2xl overflow-hidden">
-                  <div className="bg-purple-50 px-5 py-4 flex items-center gap-3 border-b border-purple-200">
-                    <RotateCcw className="h-5 w-5 text-purple-600 shrink-0" />
+                <div className={cn('border-2 rounded-2xl overflow-hidden', isAchat ? 'border-blue-200' : 'border-purple-200')}>
+                  <div className={cn('px-5 py-4 flex items-center gap-3 border-b', isAchat ? 'bg-blue-50 border-blue-200' : 'bg-purple-50 border-purple-200')}>
+                    <RotateCcw className={cn('h-5 w-5 shrink-0', isAchat ? 'text-blue-600' : 'text-purple-600')} />
                     <div>
-                      <p className="text-sm font-black text-purple-900">Créer un Avoir / Retour</p>
-                      <p className="text-xs text-purple-600">
-                        Définissez les quantités retournées. Un avoir sera créé et le stock re-crédité.
+                      <p className={cn('text-sm font-black', isAchat ? 'text-blue-900' : 'text-purple-900')}>
+                        {isAchat ? 'Retour Fournisseur' : 'Avoir / Retour Client'}
+                      </p>
+                      <p className={cn('text-xs', isAchat ? 'text-blue-600' : 'text-purple-600')}>
+                        {isAchat
+                          ? 'Définissez les quantités retournées au fournisseur. Le stock sera décrémenté.'
+                          : 'Définissez les quantités retournées. Un avoir sera créé et le stock re-crédité.'}
                       </p>
                     </div>
                   </div>
@@ -792,23 +850,30 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                       </div>
                     ))}
                   </div>
-                  {/* Total avoir + bouton confirmer */}
-                  <div className="bg-purple-50 px-5 py-4 border-t border-purple-200 flex items-center justify-between">
+                  {/* Total retour + bouton confirmer */}
+                  <div className={cn('px-5 py-4 border-t flex items-center justify-between', isAchat ? 'bg-blue-50 border-blue-200' : 'bg-purple-50 border-purple-200')}>
                     <div>
-                      <p className="text-[10px] font-black text-purple-400 uppercase tracking-widest">Total avoir</p>
-                      <p className="text-xl font-black text-purple-700">{returnTotal.toFixed(2)} DH</p>
+                      <p className={cn('text-[10px] font-black uppercase tracking-widest', isAchat ? 'text-blue-400' : 'text-purple-400')}>
+                        Total retour
+                      </p>
+                      <p className={cn('text-xl font-black', isAchat ? 'text-blue-700' : 'text-purple-700')}>{returnTotal.toFixed(2)} DH</p>
                     </div>
                     <button
                       onClick={handleCreateReturn}
                       disabled={creatingReturn || returnTotal < 0.01}
-                      className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white font-black rounded-2xl transition-all shadow-lg shadow-purple-500/20 disabled:opacity-50 text-sm"
+                      className={cn(
+                        'flex items-center gap-2 px-6 py-3 text-white font-black rounded-2xl transition-all shadow-lg disabled:opacity-50 text-sm',
+                        isAchat
+                          ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20'
+                          : 'bg-purple-600 hover:bg-purple-700 shadow-purple-500/20'
+                      )}
                     >
                       {creatingReturn ? (
                         <span className="animate-pulse">Création en cours...</span>
                       ) : (
                         <>
                           <RotateCcw className="h-4 w-4" />
-                          CONFIRMER L'AVOIR
+                          {isAchat ? 'CONFIRMER LE RETOUR' : 'CONFIRMER L\'AVOIR'}
                         </>
                       )}
                     </button>
@@ -816,7 +881,9 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                   <div className="bg-amber-50 border-t border-amber-100 px-5 py-3 flex items-start gap-2">
                     <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
                     <p className="text-[11px] text-amber-700 font-medium">
-                      Cette action est irréversible. Un avoir lié à {operation.operationNumber} sera créé et le stock sera immédiatement recrédité.
+                      {isAchat
+                        ? `Cette action est irréversible. Le stock sera décrémenté des articles retournés au fournisseur.`
+                        : `Cette action est irréversible. Un avoir lié à ${operation.operationNumber} sera créé et le stock sera immédiatement recrédité.`}
                     </p>
                   </div>
                 </div>

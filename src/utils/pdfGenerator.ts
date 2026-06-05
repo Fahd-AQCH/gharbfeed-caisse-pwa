@@ -21,7 +21,6 @@ export interface TicketOperation {
   grossTotal: number;
   discountAmount: number;
   finalTotal: number;
-  montantTva?: number;    // TVA (20% inclusive)
   montantPaye?: number;   // Montant encaissé aujourd'hui (paiement partiel)
   resteAPayer?: number;   // Solde restant dû
 }
@@ -197,10 +196,9 @@ export function generateTicketPDF(
   const totalsX = pageW - margin - totalsW;
 
   const hasDiscount  = operation.discountAmount > 0;
-  const hasTva       = (operation.montantTva ?? 0) > 0.01;
   const hasPayDetail = (operation.montantPaye ?? 0) > 0.01 || (operation.resteAPayer ?? 0) > 0.01;
-  // Rows: sous-total(HT) + TVA + [remise] + TOTAL TTC + [montant payé + reste dû]
-  const rowCount = 2 + (hasDiscount ? 1 : 0) + 1 + (hasPayDetail ? 2 : 0);
+  // Rows: sous-total + [remise] + TOTAL + [montant payé + reste dû]
+  const rowCount = 1 + (hasDiscount ? 1 : 0) + 1 + (hasPayDetail ? 2 : 0);
   const totalsH  = rowCount * 6 + 8;
 
   doc.setFillColor(...COLORS.slate100);
@@ -219,14 +217,8 @@ export function generateTicketPDF(
     ty += 6;
   };
 
-  // Sous-total HT (base imposable)
-  const ht = hasTva ? (operation.finalTotal - (operation.montantTva ?? 0)) : operation.grossTotal;
-  drawRow('Sous-total HT :', `${ht.toFixed(2)} DH`);
-
-  // TVA 20%
-  if (hasTva) {
-    drawRow('TVA (20%) :', `${(operation.montantTva ?? 0).toFixed(2)} DH`);
-  }
+  // Sous-total
+  drawRow('Sous-total :', `${operation.grossTotal.toFixed(2)} DH`);
 
   // Remise
   if (hasDiscount) {
@@ -244,11 +236,11 @@ export function generateTicketPDF(
   doc.setLineWidth(0.2);
   doc.line(totalsX + 4, ty - 2, totalsX + totalsW - 4, ty - 2);
 
-  // TOTAL TTC
+  // TOTAL
   doc.setFontSize(10);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(...COLORS.slate900);
-  doc.text('TOTAL TTC :', totalsX + 4, ty + 4);
+  doc.text('TOTAL :', totalsX + 4, ty + 4);
   doc.setTextColor(...accentColor);
   doc.text(`${operation.finalTotal.toFixed(2)} DH`, totalsX + totalsW - 4, ty + 4, { align: 'right' });
   ty += 10;
