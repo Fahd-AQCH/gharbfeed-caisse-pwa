@@ -1,10 +1,10 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig, loadEnv} from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
-export default defineConfig(({mode}) => {
+export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
   return {
     plugins: [
@@ -16,6 +16,14 @@ export default defineConfig(({mode}) => {
         // Service worker strategy: cache app shell + assets on install
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+
+          // Raised from the 2 MiB default — the app bundle legitimately exceeds
+          // 2 MiB due to PDF (jsPDF), offline DB (Dexie), charts (Recharts) and
+          // the Supabase client. manualChunks below splits the build so that
+          // individual chunks stay well under this ceiling, but we keep a
+          // generous safety net for future growth.
+          maximumFileSizeToCacheInBytes: 10 * 1024 * 1024, // 10 MiB
+
           // Do NOT cache Supabase API calls — always go to network for live data
           navigateFallback: 'index.html',
           runtimeCaching: [
@@ -59,6 +67,52 @@ export default defineConfig(({mode}) => {
         },
       }),
     ],
+
+    build: {
+      rollupOptions: {
+        output: {
+          // Split heavyweight vendor libraries into separate chunks so that:
+          //   1. Each chunk stays well below the 10 MiB workbox ceiling.
+          //   2. Browsers can cache unchanged chunks across deployments.
+          manualChunks(id: string) {
+            // ── PDF generation (jsPDF + autotable) ─────────────────────────
+            if (id.includes('jspdf') || id.includes('jspdf-autotable')) {
+              return 'vendor-pdf';
+            }
+            // ── Excel export (SheetJS / xlsx) ───────────────────────────────
+            if (id.includes('/xlsx/') || id.includes('\\xlsx\\') || id.includes('sheetjs')) {
+              return 'vendor-xlsx';
+            }
+            // ── Charts (Recharts + d3 utilities it pulls in) ────────────────
+            if (id.includes('recharts') || id.includes('/d3-') || id.includes('\\d3-')) {
+              return 'vendor-charts';
+            }
+            // ── Supabase client ─────────────────────────────────────────────
+            if (id.includes('@supabase')) {
+              return 'vendor-supabase';
+            }
+            // ── Offline DB (Dexie + dexie-react-hooks) ──────────────────────
+            if (id.includes('dexie')) {
+              return 'vendor-dexie';
+            }
+            // ── Animation (Framer Motion) ───────────────────────────────────
+            if (id.includes('framer-motion') || id.includes('motion/react')) {
+              return 'vendor-motion';
+            }
+            // ── React ecosystem (router, dom) ───────────────────────────────
+            if (id.includes('react-router') || id.includes('react-dom')) {
+              return 'vendor-react';
+            }
+            // ── Everything else from node_modules ───────────────────────────
+            if (id.includes('node_modules')) {
+              return 'vendor-misc';
+            }
+            // App source code falls into the default entry chunk
+          },
+        },
+      },
+    },
+
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
     },
@@ -69,7 +123,7 @@ export default defineConfig(({mode}) => {
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
+      // Do not modify — file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
     },
   };
