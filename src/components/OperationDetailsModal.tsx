@@ -543,64 +543,8 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
           </div>
         )}
 
-        {/* ── Alerte achat en attente + paiement fournisseur ── */}
-        {isPendingPurchase && isAdmin && (
-          <div className="mx-6 mt-4 bg-orange-50 border border-orange-200 rounded-2xl overflow-hidden">
-            <div className="p-4 flex items-center gap-3">
-              <ShieldCheck className="h-5 w-5 text-orange-500 shrink-0" />
-              <div>
-                <p className="text-sm font-black text-orange-800">Achat en attente de validation</p>
-                <p className="text-xs text-orange-600">Vérifiez les prix, renseignez le paiement fournisseur, puis validez pour mettre à jour le stock.</p>
-              </div>
-            </div>
-            <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="space-y-1">
-                <label className="text-[10px] font-black text-orange-700 uppercase tracking-widest">Montant payé au fournisseur (DH)</label>
-                <div className="flex gap-1.5">
-                  <input
-                    type="number" step="0.01" min="0"
-                    className="w-full bg-white border border-orange-200 rounded-xl py-2 px-3 text-sm font-black text-slate-800 focus:ring-2 focus:ring-orange-400/30"
-                    placeholder="0.00"
-                    value={supplierPaid}
-                    onChange={(e) => setSupplierPaid(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setSupplierPaid(finalTotal.toFixed(2))}
-                    className="shrink-0 px-2.5 py-1 text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl hover:bg-emerald-100 transition-all"
-                    title="Achat intégralement payé"
-                  >
-                    TOUT
-                  </button>
-                </div>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-black text-orange-700 uppercase tracking-widest">
-                  Date échéance {supplierReste > 0.01 && <span className="text-rose-600">*obligatoire</span>}
-                </label>
-                <input
-                  type="date"
-                  className={cn(
-                    'w-full bg-white border rounded-xl py-2 px-3 text-sm font-bold text-slate-800 focus:ring-2 focus:ring-orange-400/30',
-                    supplierReste > 0.01 && !supplierEcheance ? 'border-rose-400' : 'border-orange-200'
-                  )}
-                  value={supplierEcheance}
-                  onChange={(e) => setSupplierEcheance(e.target.value)}
-                  disabled={supplierReste <= 0.01}
-                />
-              </div>
-              <div className="space-y-1">
-                <p className="text-[10px] font-black text-orange-700 uppercase tracking-widest">Reste dû au fournisseur</p>
-                <p className={cn(
-                  'py-2 px-3 rounded-xl text-sm font-black border',
-                  supplierReste > 0.01 ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                )}>
-                  {supplierReste > 0.01 ? `${supplierReste.toFixed(2)} DH` : 'Soldé ✓'}
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Le bloc « achat en attente + paiement fournisseur » vit DANS la zone
+            scrollable (voir Content ci-dessous) — sinon il déborde du max-h du modal */}
 
         {/* ── Bandeau retour_client ── */}
         {isRetour && !isRetourFournisseur && (
@@ -622,13 +566,72 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
         )}
 
         {/* ── Content ── */}
-        <div className="p-6 flex-1 overflow-y-auto">
+        <div className="p-6 pb-10 flex-1 overflow-y-auto">
           {loading ? (
             <div className="flex justify-center py-10">
               <div className="h-8 w-8 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin" />
             </div>
           ) : (
             <div className="space-y-6">
+              {/* ── Alerte achat en attente + paiement fournisseur (scrollable) ── */}
+              {isPendingPurchase && isAdmin && (
+                <div className="bg-orange-50 border border-orange-200 rounded-2xl overflow-hidden">
+                  <div className="p-4 flex items-center gap-3">
+                    <ShieldCheck className="h-5 w-5 text-orange-500 shrink-0" />
+                    <div>
+                      <p className="text-sm font-black text-orange-800">Achat en attente de validation</p>
+                      <p className="text-xs text-orange-600">Vérifiez les prix, renseignez le paiement fournisseur, puis validez pour mettre à jour le stock.</p>
+                    </div>
+                  </div>
+                  <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-orange-700 uppercase tracking-widest">Montant payé au fournisseur (DH)</label>
+                      <div className="flex gap-1.5">
+                        <input
+                          type="number" step="0.01" min="0"
+                          className="w-full bg-white border border-orange-200 rounded-xl py-2 px-3 text-sm font-black text-slate-800 focus:ring-2 focus:ring-orange-400/30"
+                          placeholder="0.00"
+                          value={supplierPaid}
+                          onChange={(e) => setSupplierPaid(e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setSupplierPaid(finalTotal.toFixed(2))}
+                          className="shrink-0 px-2.5 py-1 text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl hover:bg-emerald-100 transition-all"
+                          title="Achat intégralement payé"
+                        >
+                          TOUT
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-orange-700 uppercase tracking-widest">
+                        Date échéance {supplierReste > 0.01 && <span className="text-rose-600">*obligatoire</span>}
+                      </label>
+                      <input
+                        type="date"
+                        className={cn(
+                          'w-full bg-white border rounded-xl py-2 px-3 text-sm font-bold text-slate-800 focus:ring-2 focus:ring-orange-400/30',
+                          supplierReste > 0.01 && !supplierEcheance ? 'border-rose-400' : 'border-orange-200'
+                        )}
+                        value={supplierEcheance}
+                        onChange={(e) => setSupplierEcheance(e.target.value)}
+                        disabled={supplierReste <= 0.01}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-black text-orange-700 uppercase tracking-widest">Reste dû au fournisseur</p>
+                      <p className={cn(
+                        'py-2 px-3 rounded-xl text-sm font-black border',
+                        supplierReste > 0.01 ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                      )}>
+                        {supplierReste > 0.01 ? `${supplierReste.toFixed(2)} DH` : 'Soldé ✓'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Métadonnées */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 bg-slate-50 rounded-2xl p-4 border border-slate-100">
                 <div>

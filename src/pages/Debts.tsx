@@ -55,6 +55,7 @@ interface DebtOp {
 
 type TabId = 'dashboard' | 'actives' | 'fournisseurs' | 'historique';
 type SortKey = 'echeance' | 'montant' | 'client' | 'date';
+type SupplierSortKey = 'statut' | 'fournisseur' | 'date' | 'echeance' | 'total' | 'reste';
 
 export default function Debts({ profile }: DebtsProps) {
   const isAdmin = profile?.roleId === 'admin';
@@ -83,6 +84,10 @@ export default function Debts({ profile }: DebtsProps) {
   const [supplierLoaded, setSupplierLoaded] = useState(false);
   const [supplierSearch, setSupplierSearch] = useState('');
   const [supplierExpandedId, setSupplierExpandedId] = useState<number | null>(null);
+  // Table unifiée : filtre par statut + tri interactif par en-tête de colonne
+  const [supplierStatutFilter, setSupplierStatutFilter] = useState<'all' | 'encours' | 'solde'>('all');
+  const [supplierSortKey, setSupplierSortKey] = useState<SupplierSortKey>('statut');
+  const [supplierSortDir, setSupplierSortDir] = useState<'asc' | 'desc'>('asc');
 
   // ── Debt history (tab 3) ────────────────────────────────────────────────────
   const [debtHistory, setDebtHistory] = useState<DebtOp[]>([]);
@@ -213,13 +218,13 @@ export default function Debts({ profile }: DebtsProps) {
   const fetchSupplierCredits = useCallback(async () => {
     setSupplierLoading(true);
     try {
+      // Table unifiée : TOUS les achats validés (en cours ET soldés) — le tri
+      // et le filtre par statut se font côté client dans la table
       const { data: opsData, error } = await supabase
         .from('operations')
         .select('*')
         .eq('type_op', 'achat')
         .eq('statut', 'valide')
-        .gt('reste_a_payer', 0.01)
-        .order('date_echeance', { ascending: true, nullsFirst: false })
         .order('num_op', { ascending: false })
         .limit(500);
       if (error) throw error;
@@ -490,14 +495,9 @@ export default function Debts({ profile }: DebtsProps) {
   const uniqueClients = new Set(debtOps.filter((d) => d.clientId).map((d) => d.clientId)).size;
   const totalMontantEchu = debtOps.filter((d) => d.isOverdue).reduce((s, d) => s + d.resteAPayer, 0);
 
-  // ── Reusable: debt row with payment history expand ─────────────────────────
-  const DebtRow: React.FC<{
-    debt: DebtOp;
-    onPay?: (d: DebtOp) => void;
-    expandedId: number | null;
-    onToggle: (id: number) => void;
-    manageable?: boolean;
-  }> = ({ debt, onPay, expandedId, onToggle, manageable = false }) => {
+  // ── Reusable: panneau historique des paiements (acompte initial + partiels) ──
+  // Partagé entre les cartes DebtRow (clients) et la table Crédits Fournisseurs.
+  const PaymentHistoryPanel: React.FC<{ debt: DebtOp }> = ({ debt }) => {
     const isSupplier = debt.kind === 'fournisseur';
     // Paiement initial (acompte à la création) = montant payé cumulé − somme des paiements partiels enregistrés.
     // Chaque paiement de debt_payments incrémente operations.montant_paye, donc la différence
@@ -522,6 +522,87 @@ export default function Debts({ profile }: DebtsProps) {
         isInitialPayment: true,
       });
     };
+
+    return (
+      <div className="border-t border-slate-100 bg-slate-50 px-5 py-4">
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Historique des paiements</p>
+        {loadingHistory[debt.numOp] ? (
+          <div className="flex items-center gap-2 py-3">
+            <div className="h-4 w-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+            <span className="text-xs text-slate-400 font-medium">Chargement...</span>
+          </div>
+        ) : realPayments.length === 0 && !hasInitialPayment ? (
+          <p className="text-xs text-slate-400 font-medium italic py-2">Aucun paiement enregistré.</p>
+        ) : (
+          <div className="space-y-2">
+            {hasInitialPayment && (
+              <div className="flex items-center justify-between bg-emerald-50/50 rounded-xl border border-emerald-200 px-4 py-2.5">
+                <div>
+                  <p className="text-xs font-bold text-slate-700">
+                    {debt.dateOp ? new Date(debt.dateOp).toLocaleDateString('fr-FR') : '—'}
+                    {debt.heureOp && <span className="ml-1 text-slate-400 font-normal text-[10px]">{debt.heureOp.slice(0, 5)}</span>}
+                    <span className="ml-2 text-[10px] font-bold text-slate-500">{debt.conditionPaiement}</span>
+                    <span className="ml-2 text-[9px] font-black text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded-md uppercase tracking-wider">Paiement initial</span>
+                  </p>
+                  <p className="text-[10px] text-slate-400 font-medium">Acompte versé à la création de l'opération</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <p className="font-black text-emerald-600 text-sm">+{initialPayment.toFixed(2)} DH</p>
+                  <button
+                    onClick={printInitialReceipt}
+                    className="p-1.5 text-slate-300 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                    title="Réimprimer le reçu de l'acompte initial"
+                  >
+                    <Printer className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+            {realPayments.map((p, idx) => (
+              <div key={p.id} className="flex items-center justify-between bg-white rounded-xl border border-slate-100 px-4 py-2.5">
+                <div>
+                  <p className="text-xs font-bold text-slate-700">
+                    {p.datePaiement ? new Date(p.datePaiement).toLocaleDateString('fr-FR') : '—'}
+                    {p.heurePaiement && <span className="ml-1 text-slate-400 font-normal text-[10px]">{p.heurePaiement.slice(0, 5)}</span>}
+                    <span className="ml-2 text-[10px] font-bold text-slate-500">{p.conditionPaiement}</span>
+                    {p.refPaiement && <span className="ml-1 text-[10px] text-slate-400">#{p.refPaiement}</span>}
+                  </p>
+                  {p.agentName && p.agentName !== '—' && <p className="text-[10px] text-slate-400 font-medium">par {p.agentName}</p>}
+                  {p.notes && <p className="text-[10px] text-slate-400 italic">{p.notes}</p>}
+                </div>
+                <div className="flex items-center gap-2">
+                  <p className="font-black text-emerald-600 text-sm">+{p.montant.toFixed(2)} DH</p>
+                  <button
+                    onClick={() => {
+                      // Total déjà réglé = acompte initial + tous les paiements strictement antérieurs
+                      // (realPayments est trié par created_at puis id → slice(0, idx) = chronologie exacte)
+                      const prevPaid = initialPayment + realPayments.slice(0, idx).reduce((s, px) => s + px.montant, 0);
+                      const afterBalance = Math.max(0, debt.totalDh - prevPaid - p.montant);
+                      generateDebtPaymentPDF({ operationNumber: debt.operationNumber, clientName: debt.clientName || 'Comptoir', counterpartyLabel: isSupplier ? 'Fournisseur' : 'Client', totalOriginal: debt.totalDh, montantCePaiement: p.montant, totalDejaPaye: prevPaid, resteAPayerApres: afterBalance, datePaiement: p.datePaiement, heurePaiement: p.heurePaiement, conditionPaiement: p.conditionPaiement, refPaiement: p.refPaiement, cashierName: p.agentName, notes: p.notes });
+                    }}
+                    className="p-1.5 text-slate-300 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                    title="Réimprimer le reçu"
+                  >
+                    <Printer className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ── Reusable: debt row with payment history expand ─────────────────────────
+  const DebtRow: React.FC<{
+    debt: DebtOp;
+    onPay?: (d: DebtOp) => void;
+    expandedId: number | null;
+    onToggle: (id: number) => void;
+    manageable?: boolean;
+  }> = ({ debt, onPay, expandedId, onToggle, manageable = false }) => {
+    const isSupplier = debt.kind === 'fournisseur';
 
     return (
     <div className={cn('bg-white rounded-2xl border shadow-sm overflow-hidden transition-all', debt.isOverdue ? 'border-rose-300' : 'border-slate-200')}>
@@ -640,73 +721,7 @@ export default function Debts({ profile }: DebtsProps) {
       <AnimatePresence>
         {expandedId === debt.numOp && (
           <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden">
-            <div className="border-t border-slate-100 bg-slate-50 px-5 py-4">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Historique des paiements</p>
-              {loadingHistory[debt.numOp] ? (
-                <div className="flex items-center gap-2 py-3">
-                  <div className="h-4 w-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-                  <span className="text-xs text-slate-400 font-medium">Chargement...</span>
-                </div>
-              ) : realPayments.length === 0 && !hasInitialPayment ? (
-                <p className="text-xs text-slate-400 font-medium italic py-2">Aucun paiement enregistré.</p>
-              ) : (
-                <div className="space-y-2">
-                  {hasInitialPayment && (
-                    <div className="flex items-center justify-between bg-emerald-50/50 rounded-xl border border-emerald-200 px-4 py-2.5">
-                      <div>
-                        <p className="text-xs font-bold text-slate-700">
-                          {debt.dateOp ? new Date(debt.dateOp).toLocaleDateString('fr-FR') : '—'}
-                          {debt.heureOp && <span className="ml-1 text-slate-400 font-normal text-[10px]">{debt.heureOp.slice(0, 5)}</span>}
-                          <span className="ml-2 text-[10px] font-bold text-slate-500">{debt.conditionPaiement}</span>
-                          <span className="ml-2 text-[9px] font-black text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded-md uppercase tracking-wider">Paiement initial</span>
-                        </p>
-                        <p className="text-[10px] text-slate-400 font-medium">Acompte versé à la création de l'opération</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <p className="font-black text-emerald-600 text-sm">+{initialPayment.toFixed(2)} DH</p>
-                        <button
-                          onClick={printInitialReceipt}
-                          className="p-1.5 text-slate-300 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
-                          title="Réimprimer le reçu de l'acompte initial"
-                        >
-                          <Printer className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {realPayments.map((p, idx) => (
-                    <div key={p.id} className="flex items-center justify-between bg-white rounded-xl border border-slate-100 px-4 py-2.5">
-                      <div>
-                        <p className="text-xs font-bold text-slate-700">
-                          {p.datePaiement ? new Date(p.datePaiement).toLocaleDateString('fr-FR') : '—'}
-                          {p.heurePaiement && <span className="ml-1 text-slate-400 font-normal text-[10px]">{p.heurePaiement.slice(0, 5)}</span>}
-                          <span className="ml-2 text-[10px] font-bold text-slate-500">{p.conditionPaiement}</span>
-                          {p.refPaiement && <span className="ml-1 text-[10px] text-slate-400">#{p.refPaiement}</span>}
-                        </p>
-                        {p.agentName && p.agentName !== '—' && <p className="text-[10px] text-slate-400 font-medium">par {p.agentName}</p>}
-                        {p.notes && <p className="text-[10px] text-slate-400 italic">{p.notes}</p>}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <p className="font-black text-emerald-600 text-sm">+{p.montant.toFixed(2)} DH</p>
-                        <button
-                          onClick={() => {
-                            // Total déjà réglé = acompte initial + tous les paiements strictement antérieurs
-                            // (realPayments est trié par created_at puis id → slice(0, idx) = chronologie exacte)
-                            const prevPaid = initialPayment + realPayments.slice(0, idx).reduce((s, px) => s + px.montant, 0);
-                            const afterBalance = Math.max(0, debt.totalDh - prevPaid - p.montant);
-                            generateDebtPaymentPDF({ operationNumber: debt.operationNumber, clientName: debt.clientName || 'Comptoir', counterpartyLabel: isSupplier ? 'Fournisseur' : 'Client', totalOriginal: debt.totalDh, montantCePaiement: p.montant, totalDejaPaye: prevPaid, resteAPayerApres: afterBalance, datePaiement: p.datePaiement, heurePaiement: p.heurePaiement, conditionPaiement: p.conditionPaiement, refPaiement: p.refPaiement, cashierName: p.agentName, notes: p.notes });
-                          }}
-                          className="p-1.5 text-slate-300 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
-                          title="Réimprimer le reçu"
-                        >
-                          <Printer className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            <PaymentHistoryPanel debt={debt} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -994,100 +1009,293 @@ export default function Debts({ profile }: DebtsProps) {
           </>
         )}
 
-        {/* ── TAB: Crédits Fournisseurs (comptes à payer) ── */}
-        {activeTab === 'fournisseurs' && canManage && (
-          <>
-            {/* KPIs fournisseurs */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total dû aux fournisseurs</span>
-                  <div className="h-8 w-8 bg-blue-50 rounded-xl flex items-center justify-center"><Building2 className="h-4 w-4 text-blue-500" /></div>
+        {/* ── TAB: Crédits Fournisseurs — table unifiée (en cours + soldés) ── */}
+        {activeTab === 'fournisseurs' && canManage && (() => {
+          const actives = supplierOps.filter((d) => d.resteAPayer > 0.01);
+          const nbSoldes = supplierOps.length - actives.length;
+          const totalDuFournisseurs = actives.reduce((s, d) => s + d.resteAPayer, 0);
+          const overdue = actives.filter((d) => d.isOverdue);
+          const totalOverdue = overdue.reduce((s, d) => s + d.resteAPayer, 0);
+
+          const visible = supplierOps.filter((d) => {
+            if (supplierStatutFilter === 'encours' && d.resteAPayer <= 0.01) return false;
+            if (supplierStatutFilter === 'solde' && d.resteAPayer > 0.01) return false;
+            if (!supplierSearch.trim()) return true;
+            const q = supplierSearch.toLowerCase();
+            return (d.clientName || '').toLowerCase().includes(q) || d.operationNumber.toLowerCase().includes(q);
+          });
+
+          const dir = supplierSortDir === 'asc' ? 1 : -1;
+          const sorted = [...visible].sort((a, b) => {
+            switch (supplierSortKey) {
+              case 'statut':      return ((a.resteAPayer > 0.01 ? 0 : 1) - (b.resteAPayer > 0.01 ? 0 : 1)) * dir;
+              case 'fournisseur': return (a.clientName || '').localeCompare(b.clientName || '', 'fr') * dir;
+              case 'date':        return (a.dateOp || '').localeCompare(b.dateOp || '') * dir;
+              case 'echeance':    return (a.dateEcheance || '9999-12-31').localeCompare(b.dateEcheance || '9999-12-31') * dir;
+              case 'total':       return (a.totalDh - b.totalDh) * dir;
+              case 'reste':
+              default:            return (a.resteAPayer - b.resteAPayer) * dir;
+            }
+          });
+
+          const toggleSort = (key: SupplierSortKey) => {
+            if (supplierSortKey === key) setSupplierSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+            else { setSupplierSortKey(key); setSupplierSortDir('asc'); }
+          };
+
+          const sortTh = (key: SupplierSortKey, label: string, alignRight = false) => (
+            <th
+              onClick={() => toggleSort(key)}
+              className={cn(
+                'px-4 py-3 text-[10px] font-black uppercase tracking-widest cursor-pointer select-none transition-colors hover:text-blue-600',
+                alignRight ? 'text-right' : 'text-left',
+                supplierSortKey === key ? 'text-blue-600' : 'text-slate-400'
+              )}
+              title={`Trier par ${label.toLowerCase()}`}
+            >
+              <span className={cn('inline-flex items-center gap-1', alignRight && 'justify-end')}>
+                {label}
+                {supplierSortKey === key
+                  ? (supplierSortDir === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />)
+                  : <ArrowUpDown className="h-3 w-3 opacity-40" />}
+              </span>
+            </th>
+          );
+
+          const toggleExpand = (id: number) => {
+            if (supplierExpandedId === id) { setSupplierExpandedId(null); return; }
+            setSupplierExpandedId(id);
+            fetchPaymentHistory(id);
+          };
+
+          return (
+            <>
+              {/* KPIs fournisseurs (calculés sur les crédits EN COURS) */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total dû aux fournisseurs</span>
+                    <div className="h-8 w-8 bg-blue-50 rounded-xl flex items-center justify-center"><Building2 className="h-4 w-4 text-blue-500" /></div>
+                  </div>
+                  <p className="text-2xl font-black text-blue-700">
+                    {totalDuFournisseurs.toFixed(0)}
+                    <span className="text-sm font-bold text-slate-400 ml-1">DH</span>
+                  </p>
+                  <p className="text-xs text-slate-400 font-medium mt-1">Comptes à payer (achats)</p>
                 </div>
-                <p className="text-2xl font-black text-blue-700">
-                  {supplierOps.reduce((s, d) => s + d.resteAPayer, 0).toFixed(0)}
-                  <span className="text-sm font-bold text-slate-400 ml-1">DH</span>
-                </p>
-                <p className="text-xs text-slate-400 font-medium mt-1">Comptes à payer (achats)</p>
-              </div>
-              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Crédits actifs</span>
-                  <div className="h-8 w-8 bg-amber-50 rounded-xl flex items-center justify-center"><TrendingDown className="h-4 w-4 text-amber-500" /></div>
+                <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Crédits en cours</span>
+                    <div className="h-8 w-8 bg-amber-50 rounded-xl flex items-center justify-center"><TrendingDown className="h-4 w-4 text-amber-500" /></div>
+                  </div>
+                  <p className="text-2xl font-black text-slate-900">{actives.length}</p>
+                  <p className="text-xs text-slate-400 font-medium mt-1">{nbSoldes} soldé(s) · {supplierOps.length} achat(s) au total</p>
                 </div>
-                <p className="text-2xl font-black text-slate-900">{supplierOps.length}</p>
-                <p className="text-xs text-slate-400 font-medium mt-1">Achats non soldés</p>
-              </div>
-              {(() => {
-                const overdue = supplierOps.filter((d) => d.isOverdue);
-                const totalOverdue = overdue.reduce((s, d) => s + d.resteAPayer, 0);
-                return (
-                  <div className={cn('rounded-2xl border p-5 shadow-sm', overdue.length > 0 ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200')}>
-                    <div className="flex items-center justify-between mb-3">
-                      <span className={cn('text-[10px] font-black uppercase tracking-widest', overdue.length > 0 ? 'text-rose-500' : 'text-slate-400')}>Échéances dépassées</span>
-                      <div className={cn('h-8 w-8 rounded-xl flex items-center justify-center', overdue.length > 0 ? 'bg-rose-100' : 'bg-slate-50')}>
-                        <AlertTriangle className={cn('h-4 w-4', overdue.length > 0 ? 'text-rose-600' : 'text-slate-400')} />
-                      </div>
+                <div className={cn('rounded-2xl border p-5 shadow-sm', overdue.length > 0 ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200')}>
+                  <div className="flex items-center justify-between mb-3">
+                    <span className={cn('text-[10px] font-black uppercase tracking-widest', overdue.length > 0 ? 'text-rose-500' : 'text-slate-400')}>Échéances dépassées</span>
+                    <div className={cn('h-8 w-8 rounded-xl flex items-center justify-center', overdue.length > 0 ? 'bg-rose-100' : 'bg-slate-50')}>
+                      <AlertTriangle className={cn('h-4 w-4', overdue.length > 0 ? 'text-rose-600' : 'text-slate-400')} />
                     </div>
-                    <p className={cn('text-2xl font-black', overdue.length > 0 ? 'text-rose-700' : 'text-slate-900')}>{overdue.length}</p>
-                    <p className={cn('text-xs font-medium mt-1', overdue.length > 0 ? 'text-rose-600' : 'text-slate-400')}>
-                      {overdue.length > 0 ? `${totalOverdue.toFixed(0)} DH à régler d'urgence` : 'Aucun retard de paiement'}
-                    </p>
                   </div>
-                );
-              })()}
-            </div>
-
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Filtrer par fournisseur ou numéro d'opération..."
-                className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 transition-all"
-                value={supplierSearch}
-                onChange={(e) => setSupplierSearch(e.target.value)}
-              />
-            </div>
-
-            {supplierLoading ? (
-              <div className="flex items-center justify-center py-20">
-                <div className="h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-              </div>
-            ) : (() => {
-              const filteredSuppliers = supplierOps.filter((d) => {
-                if (!supplierSearch.trim()) return true;
-                const q = supplierSearch.toLowerCase();
-                return (d.clientName || '').toLowerCase().includes(q) || d.operationNumber.toLowerCase().includes(q);
-              });
-              return filteredSuppliers.length === 0 ? (
-                <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center">
-                  <div className="h-16 w-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <CheckCircle2 className="h-8 w-8 text-emerald-500" />
-                  </div>
-                  <p className="text-xl font-black text-slate-900">{supplierSearch ? 'Aucun résultat' : 'Aucun crédit fournisseur !'}</p>
-                  <p className="text-sm text-slate-400 font-medium mt-1">{supplierSearch ? 'Modifiez votre recherche.' : 'Tous les achats sont intégralement réglés.'}</p>
+                  <p className={cn('text-2xl font-black', overdue.length > 0 ? 'text-rose-700' : 'text-slate-900')}>{overdue.length}</p>
+                  <p className={cn('text-xs font-medium mt-1', overdue.length > 0 ? 'text-rose-600' : 'text-slate-400')}>
+                    {overdue.length > 0 ? `${totalOverdue.toFixed(0)} DH à régler d'urgence` : 'Aucun retard de paiement'}
+                  </p>
                 </div>
-              ) : (
-                <div className="space-y-3">
-                  {filteredSuppliers.map((debt) => (
-                    <DebtRow
-                      key={debt.numOp}
-                      debt={debt}
-                      onPay={openPaymentModal}
-                      expandedId={supplierExpandedId}
-                      onToggle={(id) => {
-                        if (supplierExpandedId === id) { setSupplierExpandedId(null); return; }
-                        setSupplierExpandedId(id);
-                        fetchPaymentHistory(id);
-                      }}
-                      manageable={canManage}
-                    />
+              </div>
+
+              {/* Toolbar : recherche + filtre statut */}
+              <div className="flex flex-col lg:flex-row gap-3">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Filtrer par fournisseur ou numéro d'opération..."
+                    className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 transition-all"
+                    value={supplierSearch}
+                    onChange={(e) => setSupplierSearch(e.target.value)}
+                  />
+                </div>
+                <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-xl px-2 py-1.5">
+                  {([
+                    { key: 'all',     label: `Tous (${supplierOps.length})` },
+                    { key: 'encours', label: `En cours (${actives.length})` },
+                    { key: 'solde',   label: `Soldés (${nbSoldes})` },
+                  ] as { key: 'all' | 'encours' | 'solde'; label: string }[]).map((f) => (
+                    <button
+                      key={f.key}
+                      onClick={() => setSupplierStatutFilter(f.key)}
+                      className={cn(
+                        'px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all',
+                        supplierStatutFilter === f.key
+                          ? f.key === 'solde' ? 'bg-emerald-500 text-white' : f.key === 'encours' ? 'bg-orange-500 text-white' : 'bg-blue-500 text-white'
+                          : 'text-slate-500 hover:bg-slate-50'
+                      )}
+                    >
+                      {f.label}
+                    </button>
                   ))}
                 </div>
-              );
-            })()}
-          </>
-        )}
+              </div>
+
+              {/* Table unifiée */}
+              {supplierLoading ? (
+                <div className="flex items-center justify-center py-20">
+                  <div className="h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : sorted.length === 0 ? (
+                <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center">
+                  <Building2 className="h-12 w-12 text-slate-200 mx-auto mb-4" />
+                  <p className="text-xl font-black text-slate-900">
+                    {supplierSearch || supplierStatutFilter !== 'all' ? 'Aucun résultat' : 'Aucun crédit fournisseur'}
+                  </p>
+                  <p className="text-sm text-slate-400 font-medium mt-1">
+                    {supplierSearch || supplierStatutFilter !== 'all' ? 'Modifiez vos filtres.' : 'Les achats validés apparaîtront ici.'}
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-50 border-b border-slate-100">
+                        <tr>
+                          {sortTh('statut', 'Statut')}
+                          {sortTh('fournisseur', 'Fournisseur')}
+                          {sortTh('date', 'Date')}
+                          {sortTh('echeance', 'Échéance')}
+                          {sortTh('total', 'Total', true)}
+                          <th className="px-4 py-3 text-right text-[10px] font-black text-slate-400 uppercase tracking-widest">Payé</th>
+                          {sortTh('reste', 'Reste dû', true)}
+                          <th className="px-4 py-3 text-right text-[10px] font-black text-slate-400 uppercase tracking-widest">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-50">
+                        {sorted.map((debt) => {
+                          const isSolde = debt.resteAPayer <= 0.01;
+                          const expanded = supplierExpandedId === debt.numOp;
+                          return (
+                            <React.Fragment key={debt.numOp}>
+                              <tr
+                                onClick={() => toggleExpand(debt.numOp)}
+                                className={cn(
+                                  'cursor-pointer transition-colors',
+                                  expanded ? 'bg-blue-50/40' : 'hover:bg-slate-50/60',
+                                  !isSolde && debt.isOverdue && !expanded && 'bg-rose-50/30'
+                                )}
+                              >
+                                {/* Statut */}
+                                <td className="px-4 py-3">
+                                  {isSolde ? (
+                                    <span className="inline-flex items-center gap-1 text-[10px] font-black text-emerald-700 bg-emerald-100 px-2 py-1 rounded-lg uppercase tracking-wider">
+                                      <CheckCircle2 className="h-3 w-3" /> Soldé
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-[10px] font-black text-orange-700 bg-orange-100 px-2 py-1 rounded-lg uppercase tracking-wider">
+                                      <Clock className="h-3 w-3" /> En cours
+                                    </span>
+                                  )}
+                                </td>
+                                {/* Fournisseur */}
+                                <td className="px-4 py-3">
+                                  <p className="font-black text-slate-900">{debt.clientName}</p>
+                                  <span className="text-[10px] font-mono font-bold text-slate-400">{debt.operationNumber}</span>
+                                </td>
+                                {/* Date */}
+                                <td className="px-4 py-3 text-xs font-bold text-slate-500">
+                                  {debt.dateOp ? new Date(debt.dateOp).toLocaleDateString('fr-FR') : '—'}
+                                </td>
+                                {/* Échéance + édition inline */}
+                                <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                                  {editingEcheanceId === debt.numOp ? (
+                                    <span className="flex items-center gap-1">
+                                      <input
+                                        type="date"
+                                        value={echeanceDraft}
+                                        onChange={(e) => setEcheanceDraft(e.target.value)}
+                                        className="text-xs font-bold border border-slate-300 rounded-lg px-2 py-0.5 focus:ring-2 focus:ring-blue-400/30"
+                                      />
+                                      <button onClick={() => handleSaveEcheance(debt)} className="p-1 text-emerald-600 hover:bg-emerald-50 rounded-lg" title="Enregistrer">
+                                        <CheckCircle2 className="h-3.5 w-3.5" />
+                                      </button>
+                                      <button onClick={() => { setEditingEcheanceId(null); setEcheanceDraft(''); }} className="p-1 text-slate-400 hover:bg-slate-100 rounded-lg" title="Annuler">
+                                        <X className="h-3.5 w-3.5" />
+                                      </button>
+                                    </span>
+                                  ) : (
+                                    <span className="flex items-center gap-1">
+                                      {debt.dateEcheance ? (
+                                        <span className={cn('text-xs font-bold', !isSolde && debt.isOverdue ? 'text-rose-600' : 'text-slate-500')}>
+                                          {new Date(debt.dateEcheance).toLocaleDateString('fr-FR')}
+                                          {!isSolde && debt.isOverdue && (
+                                            <span className="ml-1.5 text-[9px] font-black text-rose-700 bg-rose-100 px-1.5 py-0.5 rounded uppercase tracking-wider">
+                                              {debt.daysOverdue}j retard
+                                            </span>
+                                          )}
+                                        </span>
+                                      ) : (
+                                        <span className="text-xs text-slate-300 italic">—</span>
+                                      )}
+                                      {!isSolde && (
+                                        <button
+                                          onClick={() => { setEditingEcheanceId(debt.numOp); setEcheanceDraft(debt.dateEcheance || ''); }}
+                                          className="p-1 text-slate-300 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-all"
+                                          title="Modifier l'échéance"
+                                        >
+                                          <Edit2 className="h-3 w-3" />
+                                        </button>
+                                      )}
+                                    </span>
+                                  )}
+                                </td>
+                                {/* Total */}
+                                <td className="px-4 py-3 text-right font-bold text-slate-700">{debt.totalDh.toFixed(2)}</td>
+                                {/* Payé */}
+                                <td className="px-4 py-3 text-right font-bold text-emerald-600">{debt.montantPaye.toFixed(2)}</td>
+                                {/* Reste dû */}
+                                <td className={cn('px-4 py-3 text-right font-black', isSolde ? 'text-emerald-600' : 'text-rose-600')}>
+                                  {debt.resteAPayer.toFixed(2)}
+                                </td>
+                                {/* Actions */}
+                                <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                                  <div className="flex items-center justify-end gap-1.5">
+                                    {!isSolde && (
+                                      <button
+                                        onClick={() => openPaymentModal(debt)}
+                                        className="flex items-center gap-1 px-2.5 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-[11px] rounded-lg transition-all shadow-sm shadow-emerald-500/20"
+                                      >
+                                        <Plus className="h-3 w-3" /> Paiement
+                                      </button>
+                                    )}
+                                    <button
+                                      onClick={() => toggleExpand(debt.numOp)}
+                                      className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all"
+                                      title="Historique des paiements"
+                                    >
+                                      {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                              {/* Ligne étendue : historique des paiements */}
+                              {expanded && (
+                                <tr>
+                                  <td colSpan={8} className="p-0">
+                                    <PaymentHistoryPanel debt={debt} />
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          );
+        })()}
 
         {/* ── TAB 3: Full history ── */}
         {activeTab === 'historique' && (
