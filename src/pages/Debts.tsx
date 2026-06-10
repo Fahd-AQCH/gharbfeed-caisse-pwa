@@ -192,7 +192,8 @@ export default function Debts({ profile }: DebtsProps) {
         .from('debt_payments')
         .select('*')
         .eq('operation_id', opId)
-        .order('created_at', { ascending: true });
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true });
 
       const agentIds = [...new Set((payments || []).map((p: any) => p.utilisateur_id).filter(Boolean))];
       const agentMap: Record<string, string> = {};
@@ -413,7 +414,31 @@ export default function Debts({ profile }: DebtsProps) {
     expandedId: number | null;
     onToggle: (id: number) => void;
     manageable?: boolean;
-  }> = ({ debt, onPay, expandedId, onToggle, manageable = false }) => (
+  }> = ({ debt, onPay, expandedId, onToggle, manageable = false }) => {
+    // Paiement initial (acompte à la création) = montant payé cumulé − somme des paiements partiels enregistrés.
+    // Chaque paiement de debt_payments incrémente operations.montant_paye, donc la différence
+    // reconstitue exactement le montant_paye initial de l'opération.
+    const realPayments = paymentHistories[debt.numOp] || [];
+    const sumRealPayments = realPayments.reduce((s, p) => s + p.montant, 0);
+    const initialPayment = Math.max(0, debt.montantPaye - sumRealPayments);
+    const hasInitialPayment = initialPayment > 0.01;
+
+    const printInitialReceipt = () => {
+      generateDebtPaymentPDF({
+        operationNumber: debt.operationNumber,
+        clientName: debt.clientName || 'Comptoir',
+        totalOriginal: debt.totalDh,
+        montantCePaiement: initialPayment,
+        totalDejaPaye: 0,
+        resteAPayerApres: Math.max(0, debt.totalDh - initialPayment),
+        datePaiement: debt.dateOp,
+        heurePaiement: debt.heureOp,
+        conditionPaiement: debt.conditionPaiement || 'Espèce',
+        isInitialPayment: true,
+      });
+    };
+
+    return (
     <div className={cn('bg-white rounded-2xl border shadow-sm overflow-hidden transition-all', debt.isOverdue ? 'border-rose-300' : 'border-slate-200')}>
       <div
         className={cn('flex items-center gap-4 px-5 py-4 cursor-pointer hover:bg-slate-50/50 transition-colors', debt.isOverdue && 'bg-rose-50/30')}
@@ -537,11 +562,34 @@ export default function Debts({ profile }: DebtsProps) {
                   <div className="h-4 w-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
                   <span className="text-xs text-slate-400 font-medium">Chargement...</span>
                 </div>
-              ) : (paymentHistories[debt.numOp]?.length ?? 0) === 0 ? (
-                <p className="text-xs text-slate-400 font-medium italic py-2">Aucun paiement partiel enregistré.</p>
+              ) : realPayments.length === 0 && !hasInitialPayment ? (
+                <p className="text-xs text-slate-400 font-medium italic py-2">Aucun paiement enregistré.</p>
               ) : (
                 <div className="space-y-2">
-                  {paymentHistories[debt.numOp].map((p) => (
+                  {hasInitialPayment && (
+                    <div className="flex items-center justify-between bg-emerald-50/50 rounded-xl border border-emerald-200 px-4 py-2.5">
+                      <div>
+                        <p className="text-xs font-bold text-slate-700">
+                          {debt.dateOp ? new Date(debt.dateOp).toLocaleDateString('fr-FR') : '—'}
+                          {debt.heureOp && <span className="ml-1 text-slate-400 font-normal text-[10px]">{debt.heureOp.slice(0, 5)}</span>}
+                          <span className="ml-2 text-[10px] font-bold text-slate-500">{debt.conditionPaiement}</span>
+                          <span className="ml-2 text-[9px] font-black text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded-md uppercase tracking-wider">Paiement initial</span>
+                        </p>
+                        <p className="text-[10px] text-slate-400 font-medium">Acompte versé à la création de l'opération</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <p className="font-black text-emerald-600 text-sm">+{initialPayment.toFixed(2)} DH</p>
+                        <button
+                          onClick={printInitialReceipt}
+                          className="p-1.5 text-slate-300 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                          title="Réimprimer le reçu de l'acompte initial"
+                        >
+                          <Printer className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {realPayments.map((p, idx) => (
                     <div key={p.id} className="flex items-center justify-between bg-white rounded-xl border border-slate-100 px-4 py-2.5">
                       <div>
                         <p className="text-xs font-bold text-slate-700">
@@ -557,7 +605,9 @@ export default function Debts({ profile }: DebtsProps) {
                         <p className="font-black text-emerald-600 text-sm">+{p.montant.toFixed(2)} DH</p>
                         <button
                           onClick={() => {
-                            const prevPaid = (paymentHistories[debt.numOp] || []).filter(px => px.id < p.id).reduce((s, px) => s + px.montant, 0);
+                            // Total déjà réglé = acompte initial + tous les paiements strictement antérieurs
+                            // (realPayments est trié par created_at puis id → slice(0, idx) = chronologie exacte)
+                            const prevPaid = initialPayment + realPayments.slice(0, idx).reduce((s, px) => s + px.montant, 0);
                             const afterBalance = Math.max(0, debt.totalDh - prevPaid - p.montant);
                             generateDebtPaymentPDF({ operationNumber: debt.operationNumber, clientName: debt.clientName || 'Comptoir', totalOriginal: debt.totalDh, montantCePaiement: p.montant, totalDejaPaye: prevPaid, resteAPayerApres: afterBalance, datePaiement: p.datePaiement, heurePaiement: p.heurePaiement, conditionPaiement: p.conditionPaiement, refPaiement: p.refPaiement, cashierName: p.agentName, notes: p.notes });
                           }}
@@ -576,7 +626,8 @@ export default function Debts({ profile }: DebtsProps) {
         )}
       </AnimatePresence>
     </div>
-  );
+    );
+  };
 
   return (
     <div className="h-full overflow-y-auto p-8">

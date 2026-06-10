@@ -15,6 +15,7 @@ export interface DebtPaymentReceiptData {
   refPaiement?: string;
   cashierName?: string;
   notes?: string;
+  isInitialPayment?: boolean; // acompte versé à la création de l'opération (pas dans debt_payments)
 }
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
@@ -66,7 +67,10 @@ export function generateDebtPaymentPDF(data: DebtPaymentReceiptData): void {
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.5);
   doc.setTextColor(...C.white);
-  doc.text('REÇU DE RÈGLEMENT DE CRÉANCE', pageW / 2, y + 6.5, { align: 'center' });
+  doc.text(
+    data.isInitialPayment ? "REÇU D'ACOMPTE INITIAL — À LA CRÉATION" : 'REÇU DE RÈGLEMENT DE CRÉANCE',
+    pageW / 2, y + 6.5, { align: 'center' }
+  );
   y += 14;
 
   // ── REFERENCE INFO (2 columns) ───────────────────────────────────────────────
@@ -198,5 +202,5 @@ export function generateDebtPaymentPDF(data: DebtPaymentReceiptData): void {
   doc.text('GharbFeed v1.2 · Gestion des Créances', pageW / 2, footerY, { align: 'center' });
   doc.text('Merci !', pageW - margin, footerY, { align: 'right' });
 
-  doc.save(`recu_${data.operationNumber}_${data.datePaiement}.pdf`);
+  doc.save(`recu_${data.operationNumber}_${data.datePaiement}${data.isInitialPayment ? '_initial' : ''}.pdf`);
 }
