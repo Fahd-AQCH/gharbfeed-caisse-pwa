@@ -19,6 +19,7 @@ import Admin from './pages/Admin';
 import Fournisseurs from './pages/Fournisseurs';
 import Debts from './pages/Debts';
 import Expenses from './pages/Expenses';
+import Closures from './pages/Closures';
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
 import { AnimatePresence } from 'motion/react';
@@ -230,6 +231,7 @@ export default function App() {
                   <Route path="/fournisseurs" element={<Fournisseurs profile={profile} />} />
                   <Route path="/debts" element={<Debts profile={profile} />} />
                   <Route path="/expenses" element={<Expenses profile={profile} />} />
+                  <Route path="/closures" element={<Closures profile={profile} />} />
                   <Route path="/admin" element={<Admin profile={profile} />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

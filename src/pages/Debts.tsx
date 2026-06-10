@@ -24,10 +24,12 @@ import {
   ArrowUpDown,
   Crown,
   Building2,
+  Lock,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateDebtPaymentPDF } from '../utils/debtPdfGenerator';
+import { fetchLatestClosure, isBeforeLock, ClosureLock } from '../lib/closureLock';
 
 interface DebtsProps {
   profile: UserProfile | null;
@@ -77,6 +79,13 @@ export default function Debts({ profile }: DebtsProps) {
   // Édition inline de l'échéance (admin / trésorier)
   const [editingEcheanceId, setEditingEcheanceId] = useState<number | null>(null);
   const [echeanceDraft, setEcheanceDraft] = useState('');
+
+  // Soft lock clôture de caisse : une op datée ≤ dernière clôture est verrouillée
+  // pour les non-admins (l'échéance est une donnée de l'opération — l'enregistrement
+  // d'un PAIEMENT reste permis : c'est une écriture nouvelle de la période ouverte)
+  const [closureLock, setClosureLock] = useState<ClosureLock | null>(null);
+  useEffect(() => { fetchLatestClosure().then(setClosureLock); }, []);
+  const isOpLocked = (d: DebtOp) => !isAdmin && isBeforeLock(d.dateOp, d.heureOp, closureLock);
 
   // ── Crédits fournisseurs (comptes à payer) — admin / trésorier uniquement ──
   const [supplierOps, setSupplierOps] = useState<DebtOp[]>([]);
@@ -415,6 +424,11 @@ export default function Debts({ profile }: DebtsProps) {
 
   // ── Édition échéance ────────────────────────────────────────────────────────
   const handleSaveEcheance = async (debt: DebtOp) => {
+    // Garde défensive — le bouton est déjà masqué, mais on bloque aussi l'action
+    if (isOpLocked(debt)) {
+      alert('Période clôturée : cette opération est verrouillée. Seul l\'administrateur peut la modifier.');
+      return;
+    }
     try {
       const { error } = await supabase
         .from('operations')
@@ -659,7 +673,7 @@ export default function Debts({ profile }: DebtsProps) {
                 ) : manageable ? (
                   <p className="text-xs font-medium text-slate-300 italic">Sans échéance</p>
                 ) : null}
-                {manageable && (
+                {manageable && !isOpLocked(debt) && (
                   <button
                     onClick={(e) => { e.stopPropagation(); setEditingEcheanceId(debt.numOp); setEcheanceDraft(debt.dateEcheance || ''); }}
                     className="p-1 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all"
@@ -667,6 +681,11 @@ export default function Debts({ profile }: DebtsProps) {
                   >
                     <Edit2 className="h-3 w-3" />
                   </button>
+                )}
+                {manageable && isOpLocked(debt) && (
+                  <span className="p-1 text-slate-300" title="Période clôturée — modifiable par l'admin uniquement">
+                    <Lock className="h-3 w-3" />
+                  </span>
                 )}
               </span>
             )}
@@ -1236,7 +1255,7 @@ export default function Debts({ profile }: DebtsProps) {
                                       ) : (
                                         <span className="text-xs text-slate-300 italic">—</span>
                                       )}
-                                      {!isSolde && (
+                                      {!isSolde && !isOpLocked(debt) && (
                                         <button
                                           onClick={() => { setEditingEcheanceId(debt.numOp); setEcheanceDraft(debt.dateEcheance || ''); }}
                                           className="p-1 text-slate-300 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-all"
@@ -1244,6 +1263,11 @@ export default function Debts({ profile }: DebtsProps) {
                                         >
                                           <Edit2 className="h-3 w-3" />
                                         </button>
+                                      )}
+                                      {!isSolde && isOpLocked(debt) && (
+                                        <span className="p-1 text-slate-300" title="Période clôturée — modifiable par l'admin uniquement">
+                                          <Lock className="h-3 w-3" />
+                                        </span>
                                       )}
                                     </span>
                                   )}

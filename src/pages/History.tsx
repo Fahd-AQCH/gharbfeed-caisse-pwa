@@ -23,6 +23,7 @@ import {
 import { cn } from '../lib/utils';
 import OperationDetailsModal from '../components/OperationDetailsModal';
 import { generateTicketPDF, TicketItem, TicketOperation } from '../utils/pdfGenerator';
+import { fetchLatestClosure, isBeforeLock, ClosureLock } from '../lib/closureLock';
 
 interface HistoryProps {
   profile: UserProfile | null;
@@ -41,6 +42,8 @@ interface HistoryOperation extends Operation {
   parentOpId?: number;
   montantPaye?: number;
   resteAPayer?: number;
+  dateOp?: string;   // brut 'YYYY-MM-DD' — comparaison avec le verrou de clôture
+  heureOp?: string;  // brut 'HH:MM:SS'
 }
 
 type DbOperationItem = {
@@ -138,6 +141,8 @@ function mapOperationRow(row: Record<string, unknown>): HistoryOperation {
     parentOpId: row.parent_op_id != null ? Number(row.parent_op_id) : undefined,
     montantPaye: row.montant_paye != null ? parseFloat(String(row.montant_paye)) : undefined,
     resteAPayer: row.reste_a_payer != null ? parseFloat(String(row.reste_a_payer)) : undefined,
+    dateOp: row.date_op ? String(row.date_op) : undefined,
+    heureOp: row.heure_op ? String(row.heure_op) : undefined,
   };
 }
 
@@ -159,6 +164,12 @@ export default function History({ profile }: HistoryProps) {
   const [operations, setOperations] = useState<HistoryOperation[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
+
+  // Soft lock clôture de caisse : opérations ≤ dernière clôture verrouillées (sauf admin)
+  const [closureLock, setClosureLock] = useState<ClosureLock | null>(null);
+  useEffect(() => { fetchLatestClosure().then(setClosureLock); }, []);
+  const isOpLocked = (op: HistoryOperation) =>
+    !isAdmin && isBeforeLock(op.dateOp, op.heureOp, closureLock);
   const [search, setSearch] = useState('');
   const [dateFilter, setDateFilter] = useState('');
   const [selectedOperation, setSelectedOperation] = useState<HistoryOperation | null>(null);
@@ -865,8 +876,11 @@ export default function History({ profile }: HistoryProps) {
                           </td>
                           {/* N° */}
                           <td className="px-4 py-3">
-                            <span className="font-mono font-bold text-slate-600 text-xs uppercase tracking-tighter">
+                            <span className="font-mono font-bold text-slate-600 text-xs uppercase tracking-tighter inline-flex items-center gap-1">
                               {op.operationNumber}
+                              {isOpLocked(op) && (
+                                <Lock className="h-3 w-3 text-slate-400" aria-label="Période clôturée — modifiable par l'admin uniquement" />
+                              )}
                             </span>
                           </td>
                           {/* Type */}

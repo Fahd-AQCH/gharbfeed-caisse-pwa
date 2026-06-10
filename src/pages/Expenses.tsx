@@ -14,10 +14,12 @@ import {
   Loader2,
   Download,
   FilterX,
+  Lock,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
+import { fetchLatestClosure, isBeforeLock, ClosureLock } from '../lib/closureLock';
 
 interface ExpensesProps {
   profile: UserProfile | null;
@@ -71,6 +73,12 @@ export default function Expenses({ profile }: ExpensesProps) {
 
   const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
 
+  // Soft lock clôture de caisse : charges datées ≤ dernière clôture verrouillées (sauf admin)
+  const [closureLock, setClosureLock] = useState<ClosureLock | null>(null);
+  useEffect(() => { fetchLatestClosure().then(setClosureLock); }, []);
+  const isChargeLocked = (e: Expense) =>
+    !isAdmin && isBeforeLock(e.dateCharge, e.heureCharge, closureLock);
+
   const fetchExpenses = useCallback(async () => {
     setLoading(true);
     try {
@@ -122,6 +130,10 @@ export default function Expenses({ profile }: ExpensesProps) {
   };
 
   const openEdit = (e: Expense) => {
+    if (isChargeLocked(e)) {
+      alert('Période clôturée : cette charge est verrouillée. Seul l\'administrateur peut la modifier.');
+      return;
+    }
     setEditingId(e.id);
     setForm({
       date_charge: e.dateCharge,
@@ -172,10 +184,14 @@ export default function Expenses({ profile }: ExpensesProps) {
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (exp: Expense) => {
+    if (isChargeLocked(exp)) {
+      alert('Période clôturée : cette charge est verrouillée. Seul l\'administrateur peut la supprimer.');
+      return;
+    }
     if (!window.confirm('Supprimer cette charge ?')) return;
     try {
-      const { error } = await supabase.from('charges').delete().eq('id', id);
+      const { error } = await supabase.from('charges').delete().eq('id', exp.id);
       if (error) throw error;
       fetchExpenses();
     } catch (err) {
@@ -429,8 +445,11 @@ export default function Expenses({ profile }: ExpensesProps) {
                   {filtered.map((e) => (
                     <tr key={e.id} className="hover:bg-slate-50/50 transition-colors">
                       <td className="px-5 py-3">
-                        <p className="font-bold text-slate-900 text-xs">
+                        <p className="font-bold text-slate-900 text-xs inline-flex items-center gap-1">
                           {e.dateCharge ? new Date(e.dateCharge).toLocaleDateString('fr-FR') : '—'}
+                          {isChargeLocked(e) && (
+                            <Lock className="h-3 w-3 text-slate-400" aria-label="Période clôturée — modifiable par l'admin uniquement" />
+                          )}
                         </p>
                         {e.heureCharge && (
                           <p className="text-[10px] text-slate-400 font-medium">
@@ -474,7 +493,7 @@ export default function Expenses({ profile }: ExpensesProps) {
                               <Edit2 className="h-4 w-4" />
                             </button>
                             <button
-                              onClick={() => handleDelete(e.id)}
+                              onClick={() => handleDelete(e)}
                               className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all"
                               title="Supprimer"
                             >

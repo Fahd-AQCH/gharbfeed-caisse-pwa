@@ -12,6 +12,7 @@ import {
   Building2,
   CreditCard,
   Receipt,
+  Archive,
 } from 'lucide-react';
 import { UserProfile } from '../../types';
 import { cn } from '../../lib/utils';
@@ -29,6 +30,7 @@ const menuItems = [
   { path: '/fournisseurs', label: 'Fournisseurs', icon: Building2, roles: ['admin', 'tresorier', 'cashier', 'supervisor', 'stock_manager'] },
   { path: '/debts', label: 'Gestion des Dettes', icon: CreditCard, roles: ['admin', 'tresorier', 'cashier', 'supervisor'] },
   { path: '/expenses', label: 'Charges & Dépenses', icon: Receipt, roles: ['admin', 'tresorier'] },
+  { path: '/closures', label: 'Clôture de Caisse', icon: Archive, roles: ['admin'] },
   { path: '/history', label: 'Historique', icon: History, roles: ['admin', 'tresorier', 'supervisor', 'cashier', 'stock_manager'] },
   { path: '/admin', label: 'Administration', icon: Settings, roles: ['admin'] },
 ];
