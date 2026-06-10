@@ -693,9 +693,11 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                     <tr>
                       <th className="px-4 py-3 font-bold text-slate-500 uppercase text-[10px] tracking-widest">Produit</th>
                       <th className="px-4 py-3 font-bold text-slate-500 uppercase text-[10px] tracking-widest">QTE</th>
-                      <th className="px-4 py-3 font-bold text-slate-500 uppercase text-[10px] tracking-widest text-right">
-                        {isPendingPurchase ? 'Prix Achat (DH)' : 'Prix U. (DH)'}
-                      </th>
+                      {(!isAchat || isAdmin) && (
+                        <th className="px-4 py-3 font-bold text-slate-500 uppercase text-[10px] tracking-widest text-right">
+                          {isPendingPurchase ? 'Prix Achat (DH)' : 'Prix U. (DH)'}
+                        </th>
+                      )}
                       <th className="px-4 py-3 font-bold text-slate-500 uppercase text-[10px] tracking-widest text-right">Total (DH)</th>
                     </tr>
                   </thead>
@@ -724,27 +726,29 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                               item.quantity
                             )}
                           </td>
-                          <td className="px-4 py-3 text-right">
-                            {(isPendingPurchase && isAdmin) ? (
-                              <div className="flex flex-col items-end gap-0.5">
-                                <input
-                                  type="number"
-                                  step="0.01"
-                                  className="w-24 text-right bg-slate-50 border border-slate-200 rounded-lg p-1 text-sm font-bold focus:ring-2 focus:ring-blue-500/20"
-                                  value={item.unitPrice}
-                                  onChange={(e) => handlePriceChange(item.id, Number(e.target.value))}
-                                />
-                                {(() => {
-                                  const ref = products.find((pr) => pr.id === item.productId);
-                                  return ref?.purchasePrice != null && ref.purchasePrice > 0 ? (
-                                    <span className="text-[10px] text-slate-400 font-medium">réf: {ref.purchasePrice.toFixed(2)} DH</span>
-                                  ) : null;
-                                })()}
-                              </div>
-                            ) : (
-                              <span className="font-bold text-slate-700">{item.unitPrice.toFixed(2)}</span>
-                            )}
-                          </td>
+                          {(!isAchat || isAdmin) && (
+                            <td className="px-4 py-3 text-right">
+                              {(isPendingPurchase && isAdmin) ? (
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    className="w-24 text-right bg-slate-50 border border-slate-200 rounded-lg p-1 text-sm font-bold focus:ring-2 focus:ring-blue-500/20"
+                                    value={item.unitPrice}
+                                    onChange={(e) => handlePriceChange(item.id, Number(e.target.value))}
+                                  />
+                                  {(() => {
+                                    const ref = products.find((pr) => pr.id === item.productId);
+                                    return ref?.purchasePrice != null && ref.purchasePrice > 0 ? (
+                                      <span className="text-[10px] text-slate-400 font-medium">réf: {ref.purchasePrice.toFixed(2)} DH</span>
+                                    ) : null;
+                                  })()}
+                                </div>
+                              ) : (
+                                <span className="font-bold text-slate-700">{item.unitPrice.toFixed(2)}</span>
+                              )}
+                            </td>
+                          )}
                           <td className="px-4 py-3 font-black text-slate-900 text-right">{item.lineTotal.toFixed(2)}</td>
                         </tr>
                       );

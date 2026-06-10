@@ -4,13 +4,28 @@ export interface Role {
   permissions: any;
 }
 
+export type CanalVente = 'Sur place' | 'WhatsApp' | 'Facebook' | 'Téléphone' | 'Livraison';
+
 export interface UserProfile {
   id: string;
   username: string;
   email: string;
-  roleId: 'admin' | 'cashier' | 'stock_manager' | 'supervisor';
+  roleId: 'admin' | 'tresorier' | 'cashier' | 'stock_manager' | 'supervisor';
   isActive: boolean;
   createdAt: any;
+}
+
+export interface Expense {
+  id: number;
+  dateCharge: string;
+  heureCharge?: string;
+  typeCharge: string;
+  description?: string;
+  montant: number;
+  modePaiement: string;
+  utilisateurId?: string;
+  agentName?: string;
+  createdAt?: string;
 }
 
 export interface Client {

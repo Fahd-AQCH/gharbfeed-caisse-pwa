@@ -15,6 +15,10 @@ import {
   Users,
   TrendingDown,
   Printer,
+  LayoutDashboard,
+  List,
+  History,
+  ChevronRight,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -42,9 +46,14 @@ interface DebtOp {
   daysOverdue: number;
 }
 
+type TabId = 'dashboard' | 'actives' | 'historique';
+
 export default function Debts({ profile }: DebtsProps) {
   const isAdmin = profile?.roleId === 'admin';
 
+  const [activeTab, setActiveTab] = useState<TabId>('dashboard');
+
+  // ── Active debts ────────────────────────────────────────────────────────────
   const [debtOps, setDebtOps] = useState<DebtOp[]>([]);
   const [loading, setLoading] = useState(true);
   const [clientSearch, setClientSearch] = useState('');
@@ -52,7 +61,14 @@ export default function Debts({ profile }: DebtsProps) {
   const [paymentHistories, setPaymentHistories] = useState<Record<number, DebtPayment[]>>({});
   const [loadingHistory, setLoadingHistory] = useState<Record<number, boolean>>({});
 
-  // Payment modal
+  // ── Debt history (tab 3) ────────────────────────────────────────────────────
+  const [debtHistory, setDebtHistory] = useState<DebtOp[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyClientSearch, setHistoryClientSearch] = useState('');
+  const [historyExpandedId, setHistoryExpandedId] = useState<number | null>(null);
+
+  // ── Payment modal ───────────────────────────────────────────────────────────
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [activeDebt, setActiveDebt] = useState<DebtOp | null>(null);
   const [payAmount, setPayAmount] = useState('');
@@ -62,6 +78,44 @@ export default function Debts({ profile }: DebtsProps) {
   const [payLoading, setPayLoading] = useState(false);
 
   const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+  const enrichOps = async (opsData: any[]): Promise<DebtOp[]> => {
+    if (!opsData?.length) return [];
+    const clientIds = [...new Set(opsData.map((op: any) => op.client_id).filter(Boolean))];
+    const clientMap: Record<string, string> = {};
+    if (clientIds.length > 0) {
+      const { data: clients } = await supabase
+        .from('clients')
+        .select('id_client, nom_prenom')
+        .in('id_client', clientIds);
+      (clients || []).forEach((c: any) => { clientMap[String(c.id_client)] = c.nom_prenom; });
+    }
+    return opsData.map((op: any) => {
+      const echeance = op.date_echeance || null;
+      const isOverdue = !!echeance && echeance < todayStr;
+      const daysOverdue = isOverdue
+        ? Math.floor((new Date(todayStr).getTime() - new Date(echeance).getTime()) / 86400000)
+        : 0;
+      return {
+        numOp: op.num_op,
+        operationNumber: `OP-${String(op.num_op).padStart(4, '0')}`,
+        dateOp: op.date_op || '',
+        heureOp: op.heure_op || '',
+        typeOp: op.type_op || 'vente',
+        clientId: op.client_id ?? undefined,
+        clientName: op.client_id ? (clientMap[String(op.client_id)] || `#${op.client_id}`) : 'Comptoir',
+        totalDh: parseFloat(op.total_dh || 0),
+        montantPaye: parseFloat(op.montant_paye || 0),
+        resteAPayer: parseFloat(op.reste_a_payer || 0),
+        dateEcheance: echeance,
+        statutPaiement: op.statut_paiement,
+        conditionPaiement: op.condition_paiement || 'Espèce',
+        isOverdue,
+        daysOverdue,
+      };
+    });
+  };
 
   const fetchDebts = useCallback(async () => {
     setLoading(true);
@@ -74,47 +128,8 @@ export default function Debts({ profile }: DebtsProps) {
         .order('date_echeance', { ascending: true, nullsFirst: false })
         .order('num_op', { ascending: false })
         .limit(500);
-
       if (error) throw error;
-      if (!opsData?.length) { setDebtOps([]); return; }
-
-      // Enrich with client names
-      const clientIds = [...new Set(opsData.map((op: any) => op.client_id).filter(Boolean))];
-      const clientMap: Record<string, string> = {};
-      if (clientIds.length > 0) {
-        const { data: clients } = await supabase
-          .from('clients')
-          .select('id_client, nom_prenom')
-          .in('id_client', clientIds);
-        (clients || []).forEach((c: any) => { clientMap[String(c.id_client)] = c.nom_prenom; });
-      }
-
-      const mapped: DebtOp[] = opsData.map((op: any) => {
-        const echeance = op.date_echeance || null;
-        const isOverdue = !!echeance && echeance < todayStr;
-        const daysOverdue = isOverdue
-          ? Math.floor((new Date(todayStr).getTime() - new Date(echeance).getTime()) / 86400000)
-          : 0;
-        return {
-          numOp: op.num_op,
-          operationNumber: `OP-${String(op.num_op).padStart(4, '0')}`,
-          dateOp: op.date_op || '',
-          heureOp: op.heure_op || '',
-          typeOp: op.type_op || 'vente',
-          clientId: op.client_id ?? undefined,
-          clientName: op.client_id ? (clientMap[String(op.client_id)] || `#${op.client_id}`) : 'Comptoir',
-          totalDh: parseFloat(op.total_dh || 0),
-          montantPaye: parseFloat(op.montant_paye || 0),
-          resteAPayer: parseFloat(op.reste_a_payer || 0),
-          dateEcheance: echeance,
-          statutPaiement: op.statut_paiement,
-          conditionPaiement: op.condition_paiement || 'Espèce',
-          isOverdue,
-          daysOverdue,
-        };
-      });
-
-      setDebtOps(mapped);
+      setDebtOps(await enrichOps(opsData || []));
     } catch (err) {
       console.error('[Debts] fetchDebts:', err);
     } finally {
@@ -122,10 +137,36 @@ export default function Debts({ profile }: DebtsProps) {
     }
   }, [todayStr]);
 
+  const fetchDebtHistory = useCallback(async () => {
+    if (historyLoaded) return;
+    setHistoryLoading(true);
+    try {
+      const { data: opsData, error } = await supabase
+        .from('operations')
+        .select('*')
+        .in('type_op', ['vente'])
+        .eq('statut', 'valide')
+        .not('statut_paiement', 'is', null)
+        .order('num_op', { ascending: false })
+        .limit(500);
+      if (error) throw error;
+      setDebtHistory(await enrichOps(opsData || []));
+      setHistoryLoaded(true);
+    } catch (err) {
+      console.error('[Debts] fetchDebtHistory:', err);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [historyLoaded, todayStr]);
+
   useEffect(() => { fetchDebts(); }, [fetchDebts]);
 
+  useEffect(() => {
+    if (activeTab === 'historique') fetchDebtHistory();
+  }, [activeTab, fetchDebtHistory]);
+
   const fetchPaymentHistory = async (opId: number) => {
-    if (paymentHistories[opId]) return; // already loaded
+    if (paymentHistories[opId]) return;
     setLoadingHistory(prev => ({ ...prev, [opId]: true }));
     try {
       const { data: payments } = await supabase
@@ -166,12 +207,15 @@ export default function Debts({ profile }: DebtsProps) {
   };
 
   const handleToggleExpand = (opId: number) => {
-    if (expandedId === opId) {
-      setExpandedId(null);
-    } else {
-      setExpandedId(opId);
-      fetchPaymentHistory(opId);
-    }
+    if (expandedId === opId) { setExpandedId(null); return; }
+    setExpandedId(opId);
+    fetchPaymentHistory(opId);
+  };
+
+  const handleToggleHistoryExpand = (opId: number) => {
+    if (historyExpandedId === opId) { setHistoryExpandedId(null); return; }
+    setHistoryExpandedId(opId);
+    fetchPaymentHistory(opId);
   };
 
   const openPaymentModal = (debt: DebtOp) => {
@@ -187,12 +231,9 @@ export default function Debts({ profile }: DebtsProps) {
     e.preventDefault();
     if (!activeDebt || !profile?.id) return;
     const amount = parseFloat(payAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      alert('Montant invalide.');
-      return;
-    }
+    if (!Number.isFinite(amount) || amount <= 0) { alert('Montant invalide.'); return; }
     if (amount > activeDebt.resteAPayer + 0.01) {
-      alert(`Le montant saisi (${amount.toFixed(2)} DH) dépasse le solde dû (${activeDebt.resteAPayer.toFixed(2)} DH).`);
+      alert(`Le montant (${amount.toFixed(2)} DH) dépasse le solde dû (${activeDebt.resteAPayer.toFixed(2)} DH).`);
       return;
     }
     setPayLoading(true);
@@ -202,35 +243,25 @@ export default function Debts({ profile }: DebtsProps) {
       const newResteAPayer = Math.max(0, activeDebt.resteAPayer - amount);
       const isSolde = newResteAPayer <= 0.01;
 
-      // 1. Insert payment record
-      const { data: paymentRecord, error: payErr } = await supabase
-        .from('debt_payments')
-        .insert({
-          operation_id: activeDebt.numOp,
-          montant: amount,
-          date_paiement: todayStr,
-          heure_paiement: timeStr,
-          condition_paiement: payCondition,
-          ref_paiement: payRef.trim() || null,
-          utilisateur_id: profile.id,
-          notes: payNotes.trim() || null,
-        })
-        .select()
-        .single();
+      const { error: payErr } = await supabase.from('debt_payments').insert({
+        operation_id: activeDebt.numOp,
+        montant: amount,
+        date_paiement: todayStr,
+        heure_paiement: timeStr,
+        condition_paiement: payCondition,
+        ref_paiement: payRef.trim() || null,
+        utilisateur_id: profile.id,
+        notes: payNotes.trim() || null,
+      });
       if (payErr) throw payErr;
 
-      // 2. Update operation balances
-      const { error: updateErr } = await supabase
-        .from('operations')
-        .update({
-          montant_paye: newMontantPaye,
-          reste_a_payer: newResteAPayer,
-          statut_paiement: isSolde ? 'Payé' : 'Partiel',
-        })
-        .eq('num_op', activeDebt.numOp);
+      const { error: updateErr } = await supabase.from('operations').update({
+        montant_paye: newMontantPaye,
+        reste_a_payer: newResteAPayer,
+        statut_paiement: isSolde ? 'Payé' : 'Partiel',
+      }).eq('num_op', activeDebt.numOp);
       if (updateErr) throw updateErr;
 
-      // 3. Generate PDF receipt
       Promise.resolve().then(() => {
         generateDebtPaymentPDF({
           operationNumber: activeDebt.operationNumber,
@@ -248,18 +279,11 @@ export default function Debts({ profile }: DebtsProps) {
         });
       });
 
-      // Invalidate history cache for this op
-      setPaymentHistories(prev => {
-        const next = { ...prev };
-        delete next[activeDebt.numOp];
-        return next;
-      });
-
+      setPaymentHistories(prev => { const n = { ...prev }; delete n[activeDebt.numOp]; return n; });
+      setHistoryLoaded(false); // invalidate history cache
       setShowPaymentModal(false);
       fetchDebts();
-      if (isSolde) {
-        alert(`✅ Paiement enregistré. La créance ${activeDebt.operationNumber} est intégralement soldée !`);
-      }
+      if (isSolde) alert(`✅ La créance ${activeDebt.operationNumber} est intégralement soldée !`);
     } catch (err) {
       alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     } finally {
@@ -267,19 +291,150 @@ export default function Debts({ profile }: DebtsProps) {
     }
   };
 
-  // ── Derived values ────────────────────────────────────────────────────────────
-  const filtered = debtOps.filter((d) => {
+  // ── Derived values ─────────────────────────────────────────────────────────
+  const filteredActive = debtOps.filter((d) => {
     if (!clientSearch.trim()) return true;
     const q = clientSearch.toLowerCase();
-    return (
-      (d.clientName || '').toLowerCase().includes(q) ||
-      d.operationNumber.toLowerCase().includes(q)
-    );
+    return (d.clientName || '').toLowerCase().includes(q) || d.operationNumber.toLowerCase().includes(q);
   });
 
-  const totalDu = filtered.reduce((s, d) => s + d.resteAPayer, 0);
-  const nbOverdue = filtered.filter((d) => d.isOverdue).length;
-  const uniqueClients = new Set(filtered.filter((d) => d.clientId).map((d) => d.clientId)).size;
+  const filteredHistory = debtHistory.filter((d) => {
+    if (!historyClientSearch.trim()) return true;
+    const q = historyClientSearch.toLowerCase();
+    return (d.clientName || '').toLowerCase().includes(q) || d.operationNumber.toLowerCase().includes(q);
+  });
+
+  const totalDu = debtOps.reduce((s, d) => s + d.resteAPayer, 0);
+  const nbOverdue = debtOps.filter((d) => d.isOverdue).length;
+  const uniqueClients = new Set(debtOps.filter((d) => d.clientId).map((d) => d.clientId)).size;
+  const totalMontantEchu = debtOps.filter((d) => d.isOverdue).reduce((s, d) => s + d.resteAPayer, 0);
+
+  // ── Reusable: debt row with payment history expand ─────────────────────────
+  const DebtRow: React.FC<{
+    debt: DebtOp;
+    onPay?: (d: DebtOp) => void;
+    expandedId: number | null;
+    onToggle: (id: number) => void;
+  }> = ({ debt, onPay, expandedId, onToggle }) => (
+    <div className={cn('bg-white rounded-2xl border shadow-sm overflow-hidden transition-all', debt.isOverdue ? 'border-rose-300' : 'border-slate-200')}>
+      <div
+        className={cn('flex items-center gap-4 px-5 py-4 cursor-pointer hover:bg-slate-50/50 transition-colors', debt.isOverdue && 'bg-rose-50/30')}
+        onClick={() => onToggle(debt.numOp)}
+      >
+        <div className={cn('h-10 w-10 rounded-xl flex items-center justify-center shrink-0', debt.isOverdue ? 'bg-rose-100' : 'bg-amber-50')}>
+          {debt.isOverdue ? <AlertTriangle className="h-5 w-5 text-rose-600" /> : <Clock className="h-5 w-5 text-amber-500" />}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="font-black text-slate-900">{debt.clientName}</p>
+            <span className="text-[10px] font-mono font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-md">{debt.operationNumber}</span>
+            {debt.statutPaiement && (
+              <span className={cn('text-[10px] font-black px-1.5 py-0.5 rounded-md uppercase tracking-wider',
+                debt.statutPaiement === 'Payé' ? 'bg-emerald-100 text-emerald-700' :
+                debt.statutPaiement === 'Partiel' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'
+              )}>
+                {debt.statutPaiement}
+              </span>
+            )}
+            {debt.isOverdue && (
+              <span className="text-[10px] font-black text-rose-700 bg-rose-100 px-1.5 py-0.5 rounded-md uppercase tracking-wider">
+                ⚠ {debt.daysOverdue}j retard
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+            <p className="text-xs text-slate-400 font-medium">
+              {debt.dateOp ? new Date(debt.dateOp).toLocaleDateString('fr-FR') : '—'}
+            </p>
+            {debt.dateEcheance && (
+              <p className={cn('text-xs font-bold', debt.isOverdue ? 'text-rose-600' : 'text-slate-500')}>
+                Échéance : {new Date(debt.dateEcheance).toLocaleDateString('fr-FR')}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="text-right shrink-0">
+          <p className={cn('font-black text-lg', debt.resteAPayer > 0.01 ? 'text-rose-600' : 'text-emerald-600')}>
+            {debt.resteAPayer.toFixed(2)} DH
+          </p>
+          <p className="text-[10px] text-slate-400 font-medium">Payé : {debt.montantPaye.toFixed(2)} / {debt.totalDh.toFixed(2)} DH</p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+          {onPay && isAdmin && debt.resteAPayer > 0.01 && (
+            <button onClick={() => onPay(debt)} className="flex items-center gap-1.5 px-3 py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl transition-all shadow-sm shadow-emerald-500/20">
+              <Plus className="h-3.5 w-3.5" /> Paiement
+            </button>
+          )}
+          <div className="p-2 text-slate-400 hover:text-slate-700 cursor-pointer" onClick={() => onToggle(debt.numOp)}>
+            {expandedId === debt.numOp ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+          </div>
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      {debt.totalDh > 0 && (
+        <div className="px-5 pb-2">
+          <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+            <div className="h-full bg-emerald-500 rounded-full transition-all" style={{ width: `${Math.min(100, (debt.montantPaye / debt.totalDh) * 100)}%` }} />
+          </div>
+          <div className="flex justify-between text-[9px] text-slate-400 font-bold mt-0.5">
+            <span>{((debt.montantPaye / debt.totalDh) * 100).toFixed(0)}% payé</span>
+            <span>{((debt.resteAPayer / debt.totalDh) * 100).toFixed(0)}% restant</span>
+          </div>
+        </div>
+      )}
+
+      {/* Expanded payment history */}
+      <AnimatePresence>
+        {expandedId === debt.numOp && (
+          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden">
+            <div className="border-t border-slate-100 bg-slate-50 px-5 py-4">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Historique des paiements</p>
+              {loadingHistory[debt.numOp] ? (
+                <div className="flex items-center gap-2 py-3">
+                  <div className="h-4 w-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                  <span className="text-xs text-slate-400 font-medium">Chargement...</span>
+                </div>
+              ) : (paymentHistories[debt.numOp]?.length ?? 0) === 0 ? (
+                <p className="text-xs text-slate-400 font-medium italic py-2">Aucun paiement partiel enregistré.</p>
+              ) : (
+                <div className="space-y-2">
+                  {paymentHistories[debt.numOp].map((p) => (
+                    <div key={p.id} className="flex items-center justify-between bg-white rounded-xl border border-slate-100 px-4 py-2.5">
+                      <div>
+                        <p className="text-xs font-bold text-slate-700">
+                          {p.datePaiement ? new Date(p.datePaiement).toLocaleDateString('fr-FR') : '—'}
+                          {p.heurePaiement && <span className="ml-1 text-slate-400 font-normal text-[10px]">{p.heurePaiement.slice(0, 5)}</span>}
+                          <span className="ml-2 text-[10px] font-bold text-slate-500">{p.conditionPaiement}</span>
+                          {p.refPaiement && <span className="ml-1 text-[10px] text-slate-400">#{p.refPaiement}</span>}
+                        </p>
+                        {p.agentName && p.agentName !== '—' && <p className="text-[10px] text-slate-400 font-medium">par {p.agentName}</p>}
+                        {p.notes && <p className="text-[10px] text-slate-400 italic">{p.notes}</p>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <p className="font-black text-emerald-600 text-sm">+{p.montant.toFixed(2)} DH</p>
+                        <button
+                          onClick={() => {
+                            const prevPaid = (paymentHistories[debt.numOp] || []).filter(px => px.id < p.id).reduce((s, px) => s + px.montant, 0);
+                            const afterBalance = Math.max(0, debt.totalDh - prevPaid - p.montant);
+                            generateDebtPaymentPDF({ operationNumber: debt.operationNumber, clientName: debt.clientName || 'Comptoir', totalOriginal: debt.totalDh, montantCePaiement: p.montant, totalDejaPaye: prevPaid, resteAPayerApres: afterBalance, datePaiement: p.datePaiement, heurePaiement: p.heurePaiement, conditionPaiement: p.conditionPaiement, refPaiement: p.refPaiement, cashierName: p.agentName, notes: p.notes });
+                          }}
+                          className="p-1.5 text-slate-300 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                          title="Réimprimer le reçu"
+                        >
+                          <Printer className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 
   return (
     <div className="h-full overflow-y-auto p-8">
@@ -292,286 +447,189 @@ export default function Debts({ profile }: DebtsProps) {
               <CreditCard className="h-6 w-6 text-rose-500" />
               GESTION DES DETTES
             </h2>
-            <p className="text-sm text-slate-500 font-medium">
-              {debtOps.length} créance(s) active(s) en cours
-            </p>
+            <p className="text-sm text-slate-500 font-medium">{debtOps.length} créance(s) active(s)</p>
           </div>
         </div>
 
-        {/* KPI Cards */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Total dû */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Dû</span>
-              <div className="h-8 w-8 bg-rose-50 rounded-xl flex items-center justify-center">
-                <DollarSign className="h-4 w-4 text-rose-500" />
-              </div>
-            </div>
-            <p className="text-2xl font-black text-rose-600">
-              {totalDu.toFixed(0)}
-              <span className="text-sm font-bold text-slate-400 ml-1">DH</span>
-            </p>
-            <p className="text-xs text-slate-400 font-medium mt-1">Solde total restant</p>
-          </div>
-          {/* Nb créances */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Créances</span>
-              <div className="h-8 w-8 bg-amber-50 rounded-xl flex items-center justify-center">
-                <TrendingDown className="h-4 w-4 text-amber-500" />
-              </div>
-            </div>
-            <p className="text-2xl font-black text-slate-900">{filtered.length}</p>
-            <p className="text-xs text-slate-400 font-medium mt-1">Opérations en attente</p>
-          </div>
-          {/* Échues */}
-          <div className={cn('rounded-2xl border p-5 shadow-sm', nbOverdue > 0 ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200')}>
-            <div className="flex items-center justify-between mb-3">
-              <span className={cn('text-[10px] font-black uppercase tracking-widest', nbOverdue > 0 ? 'text-rose-500' : 'text-slate-400')}>
-                Échues
-              </span>
-              <div className={cn('h-8 w-8 rounded-xl flex items-center justify-center', nbOverdue > 0 ? 'bg-rose-100' : 'bg-slate-50')}>
-                <Clock className={cn('h-4 w-4', nbOverdue > 0 ? 'text-rose-600' : 'text-slate-400')} />
-              </div>
-            </div>
-            <p className={cn('text-2xl font-black', nbOverdue > 0 ? 'text-rose-700' : 'text-slate-900')}>{nbOverdue}</p>
-            <p className={cn('text-xs font-medium mt-1', nbOverdue > 0 ? 'text-rose-500' : 'text-slate-400')}>
-              {nbOverdue > 0 ? 'Dépassées échéance' : 'Aucune échéance dépassée'}
-            </p>
-          </div>
-          {/* Clients */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Clients</span>
-              <div className="h-8 w-8 bg-blue-50 rounded-xl flex items-center justify-center">
-                <Users className="h-4 w-4 text-blue-500" />
-              </div>
-            </div>
-            <p className="text-2xl font-black text-slate-900">{uniqueClients}</p>
-            <p className="text-xs text-slate-400 font-medium mt-1">Clients en créance</p>
-          </div>
+        {/* Tabs */}
+        <div className="flex bg-slate-100 p-1 w-fit rounded-xl gap-1">
+          {([
+            { id: 'dashboard', label: 'Vue d\'ensemble', icon: LayoutDashboard },
+            { id: 'actives', label: 'Créances actives', icon: List },
+            { id: 'historique', label: 'Historique', icon: History },
+          ] as { id: TabId; label: string; icon: React.ElementType }[]).map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={cn(
+                'flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-lg transition-all',
+                activeTab === tab.id ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+              )}
+            >
+              <tab.icon className="h-3.5 w-3.5" />
+              {tab.label}
+              {tab.id === 'actives' && debtOps.length > 0 && (
+                <span className="bg-rose-500 text-white text-[10px] font-black rounded-full w-4 h-4 flex items-center justify-center">
+                  {debtOps.length > 9 ? '9+' : debtOps.length}
+                </span>
+              )}
+            </button>
+          ))}
         </div>
 
-        {/* Search */}
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Filtrer par client ou numéro d'opération..."
-            className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-rose-500/10 transition-all"
-            value={clientSearch}
-            onChange={(e) => setClientSearch(e.target.value)}
-          />
-        </div>
+        {/* ── TAB 1: Dashboard ── */}
+        {activeTab === 'dashboard' && (
+          <>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Dû</span>
+                  <div className="h-8 w-8 bg-rose-50 rounded-xl flex items-center justify-center"><DollarSign className="h-4 w-4 text-rose-500" /></div>
+                </div>
+                <p className="text-2xl font-black text-rose-600">{totalDu.toFixed(0)}<span className="text-sm font-bold text-slate-400 ml-1">DH</span></p>
+                <p className="text-xs text-slate-400 font-medium mt-1">Solde total actif</p>
+              </div>
 
-        {/* Debt List */}
-        {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <div className="h-8 w-8 border-4 border-rose-500 border-t-transparent rounded-full animate-spin" />
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center">
-            <div className="h-16 w-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-4">
-              <CheckCircle2 className="h-8 w-8 text-emerald-500" />
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Créances</span>
+                  <div className="h-8 w-8 bg-amber-50 rounded-xl flex items-center justify-center"><TrendingDown className="h-4 w-4 text-amber-500" /></div>
+                </div>
+                <p className="text-2xl font-black text-slate-900">{debtOps.length}</p>
+                <p className="text-xs text-slate-400 font-medium mt-1">Opérations en attente</p>
+              </div>
+
+              <div className={cn('rounded-2xl border p-5 shadow-sm', nbOverdue > 0 ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200')}>
+                <div className="flex items-center justify-between mb-3">
+                  <span className={cn('text-[10px] font-black uppercase tracking-widest', nbOverdue > 0 ? 'text-rose-500' : 'text-slate-400')}>Échues</span>
+                  <div className={cn('h-8 w-8 rounded-xl flex items-center justify-center', nbOverdue > 0 ? 'bg-rose-100' : 'bg-slate-50')}>
+                    <Clock className={cn('h-4 w-4', nbOverdue > 0 ? 'text-rose-600' : 'text-slate-400')} />
+                  </div>
+                </div>
+                <p className={cn('text-2xl font-black', nbOverdue > 0 ? 'text-rose-700' : 'text-slate-900')}>{nbOverdue}</p>
+                <p className={cn('text-xs font-medium mt-1', nbOverdue > 0 ? 'text-rose-600' : 'text-slate-400')}>
+                  {nbOverdue > 0 ? `${totalMontantEchu.toFixed(0)} DH échus` : 'Aucune échéance dépassée'}
+                </p>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Clients</span>
+                  <div className="h-8 w-8 bg-blue-50 rounded-xl flex items-center justify-center"><Users className="h-4 w-4 text-blue-500" /></div>
+                </div>
+                <p className="text-2xl font-black text-slate-900">{uniqueClients}</p>
+                <p className="text-xs text-slate-400 font-medium mt-1">Clients en créance</p>
+              </div>
             </div>
-            <p className="text-xl font-black text-slate-900">Aucune créance active !</p>
-            <p className="text-sm text-slate-400 font-medium mt-1">Tous les comptes sont soldés.</p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {filtered.map((debt) => (
-              <div
-                key={debt.numOp}
-                className={cn(
-                  'bg-white rounded-2xl border shadow-sm overflow-hidden transition-all',
-                  debt.isOverdue ? 'border-rose-300' : 'border-slate-200'
-                )}
+
+            {/* Quick action: go to actives if any */}
+            {debtOps.length > 0 ? (
+              <button
+                onClick={() => setActiveTab('actives')}
+                className="w-full flex items-center justify-between px-5 py-4 bg-white border border-slate-200 rounded-2xl shadow-sm hover:shadow-md transition-all group"
               >
-                {/* Row header */}
-                <div
-                  className={cn(
-                    'flex items-center gap-4 px-5 py-4 cursor-pointer hover:bg-slate-50/50 transition-colors',
-                    debt.isOverdue && 'bg-rose-50/30'
-                  )}
-                  onClick={() => handleToggleExpand(debt.numOp)}
-                >
-                  {/* Overdue indicator */}
-                  <div className={cn(
-                    'h-10 w-10 rounded-xl flex items-center justify-center shrink-0',
-                    debt.isOverdue ? 'bg-rose-100' : 'bg-amber-50'
-                  )}>
-                    {debt.isOverdue
-                      ? <AlertTriangle className="h-5 w-5 text-rose-600" />
-                      : <Clock className="h-5 w-5 text-amber-500" />
-                    }
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 bg-rose-50 rounded-xl flex items-center justify-center">
+                    <List className="h-5 w-5 text-rose-500" />
                   </div>
-
-                  {/* Client + op */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <p className="font-black text-slate-900">{debt.clientName}</p>
-                      <span className="text-[10px] font-mono font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-md">
-                        {debt.operationNumber}
-                      </span>
-                      {debt.isOverdue && (
-                        <span className="text-[10px] font-black text-rose-700 bg-rose-100 px-1.5 py-0.5 rounded-md uppercase tracking-wider">
-                          ⚠ {debt.daysOverdue}j de retard
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-3 mt-0.5 flex-wrap">
-                      <p className="text-xs text-slate-400 font-medium">
-                        {debt.dateOp
-                          ? new Date(debt.dateOp).toLocaleDateString('fr-FR')
-                          : '—'}
-                      </p>
-                      {debt.dateEcheance && (
-                        <p className={cn('text-xs font-bold', debt.isOverdue ? 'text-rose-600' : 'text-slate-500')}>
-                          Échéance : {new Date(debt.dateEcheance).toLocaleDateString('fr-FR')}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Balance */}
-                  <div className="text-right shrink-0">
-                    <p className="font-black text-rose-600 text-lg">
-                      {debt.resteAPayer.toFixed(2)} DH
-                    </p>
-                    <p className="text-[10px] text-slate-400 font-medium">
-                      Payé : {debt.montantPaye.toFixed(2)} / {debt.totalDh.toFixed(2)} DH
-                    </p>
-                  </div>
-
-                  {/* Pay button (admin) + expand */}
-                  <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-                    {isAdmin && (
-                      <button
-                        onClick={() => openPaymentModal(debt)}
-                        className="flex items-center gap-1.5 px-3 py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl transition-all shadow-sm shadow-emerald-500/20"
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                        Paiement
-                      </button>
-                    )}
-                    <div
-                      className="p-2 text-slate-400 hover:text-slate-700 cursor-pointer"
-                      onClick={() => handleToggleExpand(debt.numOp)}
-                    >
-                      {expandedId === debt.numOp
-                        ? <ChevronUp className="h-4 w-4" />
-                        : <ChevronDown className="h-4 w-4" />
-                      }
-                    </div>
+                  <div className="text-left">
+                    <p className="font-black text-slate-900">Gérer les créances actives</p>
+                    <p className="text-xs text-slate-500 font-medium">{debtOps.length} créance(s) · {totalDu.toFixed(2)} DH restants</p>
                   </div>
                 </div>
-
-                {/* Progress bar */}
-                <div className="px-5 pb-2">
-                  <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-emerald-500 rounded-full transition-all"
-                      style={{ width: `${Math.min(100, (debt.montantPaye / debt.totalDh) * 100)}%` }}
-                    />
-                  </div>
-                  <div className="flex justify-between text-[9px] text-slate-400 font-bold mt-0.5">
-                    <span>{((debt.montantPaye / debt.totalDh) * 100).toFixed(0)}% payé</span>
-                    <span>{((debt.resteAPayer / debt.totalDh) * 100).toFixed(0)}% restant</span>
-                  </div>
+                <ChevronRight className="h-5 w-5 text-slate-400 group-hover:text-rose-500 transition-colors" />
+              </button>
+            ) : (
+              <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center">
+                <div className="h-16 w-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <CheckCircle2 className="h-8 w-8 text-emerald-500" />
                 </div>
-
-                {/* Expanded payment history */}
-                <AnimatePresence>
-                  {expandedId === debt.numOp && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: 'auto', opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      transition={{ duration: 0.2 }}
-                      className="overflow-hidden"
-                    >
-                      <div className="border-t border-slate-100 bg-slate-50 px-5 py-4">
-                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">
-                          Historique des paiements
-                        </p>
-                        {loadingHistory[debt.numOp] ? (
-                          <div className="flex items-center gap-2 py-3">
-                            <div className="h-4 w-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-                            <span className="text-xs text-slate-400 font-medium">Chargement...</span>
-                          </div>
-                        ) : (paymentHistories[debt.numOp]?.length ?? 0) === 0 ? (
-                          <p className="text-xs text-slate-400 font-medium italic py-2">
-                            Aucun paiement partiel enregistré pour cette créance.
-                          </p>
-                        ) : (
-                          <div className="space-y-2">
-                            {paymentHistories[debt.numOp].map((p) => (
-                              <div key={p.id} className="flex items-center justify-between bg-white rounded-xl border border-slate-100 px-4 py-2.5">
-                                <div>
-                                  <p className="text-xs font-bold text-slate-700">
-                                    {p.datePaiement ? new Date(p.datePaiement).toLocaleDateString('fr-FR') : '—'}
-                                    {p.heurePaiement && (
-                                      <span className="ml-1 text-slate-400 font-normal text-[10px]">
-                                        {p.heurePaiement.slice(0, 5)}
-                                      </span>
-                                    )}
-                                    <span className="ml-2 text-slate-400 font-normal">·</span>
-                                    <span className="ml-2 text-[10px] font-bold text-slate-500">{p.conditionPaiement}</span>
-                                    {p.refPaiement && (
-                                      <span className="ml-1 text-[10px] text-slate-400">#{p.refPaiement}</span>
-                                    )}
-                                  </p>
-                                  {p.agentName && p.agentName !== '—' && (
-                                    <p className="text-[10px] text-slate-400 font-medium">par {p.agentName}</p>
-                                  )}
-                                  {p.notes && (
-                                    <p className="text-[10px] text-slate-400 italic">{p.notes}</p>
-                                  )}
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <p className="font-black text-emerald-600 text-sm">
-                                    +{p.montant.toFixed(2)} DH
-                                  </p>
-                                  <button
-                                    onClick={() => {
-                                      // Re-generate PDF for this specific payment
-                                      const prevPaid = (paymentHistories[debt.numOp] || [])
-                                        .filter(px => px.id < p.id)
-                                        .reduce((s, px) => s + px.montant, 0);
-                                      const afterBalance = Math.max(0, debt.totalDh - prevPaid - p.montant);
-                                      generateDebtPaymentPDF({
-                                        operationNumber: debt.operationNumber,
-                                        clientName: debt.clientName || 'Comptoir',
-                                        totalOriginal: debt.totalDh,
-                                        montantCePaiement: p.montant,
-                                        totalDejaPaye: prevPaid,
-                                        resteAPayerApres: afterBalance,
-                                        datePaiement: p.datePaiement,
-                                        heurePaiement: p.heurePaiement,
-                                        conditionPaiement: p.conditionPaiement,
-                                        refPaiement: p.refPaiement,
-                                        cashierName: p.agentName,
-                                        notes: p.notes,
-                                      });
-                                    }}
-                                    className="p-1.5 text-slate-300 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
-                                    title="Réimprimer le reçu"
-                                  >
-                                    <Printer className="h-3.5 w-3.5" />
-                                  </button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+                <p className="text-xl font-black text-slate-900">Aucune créance active !</p>
+                <p className="text-sm text-slate-400 font-medium mt-1">Tous les comptes sont soldés.</p>
               </div>
-            ))}
-          </div>
+            )}
+          </>
+        )}
+
+        {/* ── TAB 2: Active debts ── */}
+        {activeTab === 'actives' && (
+          <>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Filtrer par client ou numéro d'opération..."
+                className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-rose-500/10 transition-all"
+                value={clientSearch}
+                onChange={(e) => setClientSearch(e.target.value)}
+              />
+            </div>
+
+            {loading ? (
+              <div className="flex items-center justify-center py-20">
+                <div className="h-8 w-8 border-4 border-rose-500 border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : filteredActive.length === 0 ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center">
+                <div className="h-16 w-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <CheckCircle2 className="h-8 w-8 text-emerald-500" />
+                </div>
+                <p className="text-xl font-black text-slate-900">{clientSearch ? 'Aucun résultat' : 'Aucune créance active !'}</p>
+                <p className="text-sm text-slate-400 font-medium mt-1">{clientSearch ? 'Essayez un autre terme.' : 'Tous les comptes sont soldés.'}</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {filteredActive.map((debt) => (
+                  <DebtRow
+                    key={debt.numOp}
+                    debt={debt}
+                    onPay={openPaymentModal}
+                    expandedId={expandedId}
+                    onToggle={handleToggleExpand}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ── TAB 3: Full history ── */}
+        {activeTab === 'historique' && (
+          <>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Filtrer par client..."
+                className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-rose-500/10 transition-all"
+                value={historyClientSearch}
+                onChange={(e) => setHistoryClientSearch(e.target.value)}
+              />
+            </div>
+
+            {historyLoading ? (
+              <div className="flex items-center justify-center py-20">
+                <div className="h-8 w-8 border-4 border-rose-500 border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : filteredHistory.length === 0 ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center">
+                <History className="h-12 w-12 text-slate-200 mx-auto mb-4" />
+                <p className="text-xl font-black text-slate-900">Aucun historique de dettes</p>
+                <p className="text-sm text-slate-400 font-medium mt-1">Les paiements partiels et créances soldées apparaîtront ici.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {filteredHistory.map((debt) => (
+                  <DebtRow
+                    key={debt.numOp}
+                    debt={debt}
+                    expandedId={historyExpandedId}
+                    onToggle={handleToggleHistoryExpand}
+                  />
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -579,33 +637,22 @@ export default function Debts({ profile }: DebtsProps) {
       <AnimatePresence>
         {showPaymentModal && activeDebt && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => setShowPaymentModal(false)} className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" />
             <motion.div
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              onClick={() => setShowPaymentModal(false)}
-              className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"
-            />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }}
               className="relative w-full max-w-md bg-white rounded-[28px] shadow-2xl overflow-hidden"
             >
-              {/* Modal Header */}
               <div className="p-6 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
                 <div>
-                  <h3 className="text-lg font-black text-slate-900 uppercase tracking-tight">
-                    Enregistrer un paiement
-                  </h3>
-                  <p className="text-sm text-slate-500 font-medium">
-                    {activeDebt.operationNumber} · {activeDebt.clientName}
-                  </p>
+                  <h3 className="text-lg font-black text-slate-900 uppercase tracking-tight">Enregistrer un paiement</h3>
+                  <p className="text-sm text-slate-500 font-medium">{activeDebt.operationNumber} · {activeDebt.clientName}</p>
                 </div>
                 <button onClick={() => setShowPaymentModal(false)} className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-slate-900">
                   <X className="h-5 w-5" />
                 </button>
               </div>
 
-              {/* Balance summary */}
               <div className="mx-6 mt-4 grid grid-cols-3 gap-3 bg-slate-50 rounded-2xl p-4 border border-slate-100">
                 <div className="text-center">
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total</p>
@@ -622,101 +669,58 @@ export default function Debts({ profile }: DebtsProps) {
               </div>
 
               <form onSubmit={handleRecordPayment} className="p-6 space-y-4">
-                {/* Amount */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Montant encaissé (DH)</label>
-                  <input
-                    required
-                    type="number"
-                    step="0.01"
-                    min="0.01"
-                    max={activeDebt.resteAPayer + 0.01}
+                  <input required type="number" step="0.01" min="0.01" max={activeDebt.resteAPayer + 0.01}
                     className="w-full bg-slate-50 border-none rounded-xl py-3 px-4 text-lg font-black text-emerald-600 focus:ring-2 focus:ring-emerald-500/20"
                     placeholder={`Max: ${activeDebt.resteAPayer.toFixed(2)}`}
-                    value={payAmount}
-                    onChange={(e) => setPayAmount(e.target.value)}
-                    autoFocus
-                  />
+                    value={payAmount} onChange={(e) => setPayAmount(e.target.value)} autoFocus />
                 </div>
 
-                {/* Quick full amount button */}
-                <button
-                  type="button"
-                  onClick={() => setPayAmount(activeDebt.resteAPayer.toFixed(2))}
-                  className="w-full py-2 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl hover:bg-emerald-100 transition-all"
-                >
+                <button type="button" onClick={() => setPayAmount(activeDebt.resteAPayer.toFixed(2))}
+                  className="w-full py-2 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl hover:bg-emerald-100 transition-all">
                   Paiement total — {activeDebt.resteAPayer.toFixed(2)} DH
                 </button>
 
-                {/* Mode de paiement */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Mode de paiement</label>
                   <div className="flex gap-2">
                     {(['Espèce', 'Chèque', 'Versement'] as const).map((m) => (
-                      <button
-                        key={m} type="button"
-                        onClick={() => setPayCondition(m)}
-                        className={cn(
-                          'flex-1 py-2 rounded-xl text-xs font-bold border-2 transition-all',
-                          payCondition === m
-                            ? 'bg-emerald-500 text-white border-emerald-500'
-                            : 'bg-white text-slate-600 border-slate-200 hover:border-emerald-300'
-                        )}
-                      >
-                        {m}
-                      </button>
+                      <button key={m} type="button" onClick={() => setPayCondition(m)}
+                        className={cn('flex-1 py-2 rounded-xl text-xs font-bold border-2 transition-all',
+                          payCondition === m ? 'bg-emerald-500 text-white border-emerald-500' : 'bg-white text-slate-600 border-slate-200 hover:border-emerald-300'
+                        )}>{m}</button>
                     ))}
                   </div>
                 </div>
 
-                {/* Référence (optional) */}
                 {(payCondition === 'Chèque' || payCondition === 'Versement') && (
                   <div className="space-y-1.5">
-                    <label className="text-xs font-black text-slate-400 uppercase tracking-widest">
-                      Référence {payCondition === 'Chèque' ? 'chèque' : 'virement'}
-                    </label>
-                    <input
-                      type="text"
-                      className="w-full bg-slate-50 border-none rounded-xl py-3 px-4 text-sm font-bold focus:ring-2 focus:ring-emerald-500/20"
-                      value={payRef}
-                      onChange={(e) => setPayRef(e.target.value)}
-                    />
+                    <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Référence {payCondition === 'Chèque' ? 'chèque' : 'virement'}</label>
+                    <input type="text" className="w-full bg-slate-50 border-none rounded-xl py-3 px-4 text-sm font-bold focus:ring-2 focus:ring-emerald-500/20"
+                      value={payRef} onChange={(e) => setPayRef(e.target.value)} />
                   </div>
                 )}
 
-                {/* Notes */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Notes (optionnel)</label>
-                  <input
-                    type="text"
-                    className="w-full bg-slate-50 border-none rounded-xl py-3 px-4 text-sm font-medium focus:ring-2 focus:ring-slate-500/20"
-                    value={payNotes}
-                    onChange={(e) => setPayNotes(e.target.value)}
-                    placeholder="Observation libre..."
-                  />
+                  <input type="text" className="w-full bg-slate-50 border-none rounded-xl py-3 px-4 text-sm font-medium focus:ring-2 focus:ring-slate-500/20"
+                    value={payNotes} onChange={(e) => setPayNotes(e.target.value)} placeholder="Observation libre..." />
                 </div>
 
-                {/* Preview new balance */}
                 {payAmount && parseFloat(payAmount) > 0 && (
                   <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 flex items-center justify-between">
                     <p className="text-xs font-bold text-emerald-700">Solde après ce paiement</p>
-                    <p className="font-black text-emerald-700">
-                      {Math.max(0, activeDebt.resteAPayer - parseFloat(payAmount)).toFixed(2)} DH
-                    </p>
+                    <p className="font-black text-emerald-700">{Math.max(0, activeDebt.resteAPayer - parseFloat(payAmount)).toFixed(2)} DH</p>
                   </div>
                 )}
 
                 <div className="pt-2 flex justify-end gap-3">
                   <button type="button" onClick={() => setShowPaymentModal(false)}
-                    className="px-5 py-2.5 bg-white text-slate-500 font-bold rounded-2xl hover:bg-slate-50 transition-all">
-                    Annuler
-                  </button>
+                    className="px-5 py-2.5 bg-white text-slate-500 font-bold rounded-2xl hover:bg-slate-50 transition-all">Annuler</button>
                   <button type="submit" disabled={payLoading}
                     className="px-8 py-2.5 bg-emerald-500 hover:bg-emerald-600 text-white font-black rounded-2xl shadow-lg shadow-emerald-500/20 transition-all flex items-center gap-2 disabled:opacity-50">
-                    {payLoading
-                      ? <span className="animate-pulse">Enregistrement...</span>
-                      : <><CheckCircle2 className="h-4 w-4" /> ENREGISTRER & IMPRIMER</>
-                    }
+                    {payLoading ? <span className="animate-pulse">Enregistrement...</span> : <><CheckCircle2 className="h-4 w-4" /> ENREGISTRER & IMPRIMER</>}
                   </button>
                 </div>
               </form>

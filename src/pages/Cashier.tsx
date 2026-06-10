@@ -93,6 +93,9 @@ export default function Cashier({ profile }: CashierProps) {
   const [success, setSuccess] = useState(false);
   const isAdmin = profile?.roleId === 'admin';
 
+  // Canal de vente (omnichannel)
+  const [canalVente, setCanalVente] = useState<string>('Sur place');
+
   // Conditions de paiement
   const [conditionPaiement, setConditionPaiement] = useState<'Espèce' | 'Chèque' | 'Versement'>('Espèce');
   const [refPaiement, setRefPaiement] = useState('');
@@ -574,6 +577,7 @@ export default function Cashier({ profile }: CashierProps) {
         banque_cheque:  conditionPaiement === 'Chèque' ? (banqueCheque.trim() || null) : null,
         proprietaire_cheque: conditionPaiement === 'Chèque' ? (proprietaireCheque.trim() || null) : null,
         date_encaissement_cheque: conditionPaiement === 'Chèque' && dateEncaissementCheque ? dateEncaissementCheque : null,
+        canal_vente: isVente ? canalVente : null,
         observ: isVente ? 'Vente caisse' : 'Achat en attente de validation admin',
       };
 
@@ -667,6 +671,7 @@ export default function Cashier({ profile }: CashierProps) {
         setSelectedClient(null);
         setDiscountGlobal(0);
         setSearch('');
+        setCanalVente('Sur place');
         setConditionPaiement('Espèce');
         setRefPaiement('');
         setMontantPaye('');
@@ -705,6 +710,7 @@ export default function Cashier({ profile }: CashierProps) {
         setSelectedFournisseur(null);
         setDiscountGlobal(0);
         setSearch('');
+        setCanalVente('Sur place');
         setConditionPaiement('Espèce');
         setRefPaiement('');
         setMontantPaye('');
@@ -1083,6 +1089,29 @@ export default function Cashier({ profile }: CashierProps) {
                     </div>
                   )}
                 </div>
+
+                {/* ── Section B0: Canal de vente (vente uniquement) ── */}
+                {operationType === 'vente' && (
+                  <div className="px-6 py-4 border-b border-slate-100">
+                    <p className="text-xs font-black text-slate-500 uppercase tracking-widest mb-3">Canal de vente</p>
+                    <div className="flex flex-wrap gap-2">
+                      {(['Sur place', 'WhatsApp', 'Facebook', 'Téléphone', 'Livraison'] as const).map((c) => (
+                        <button
+                          key={c} type="button"
+                          onClick={() => setCanalVente(c)}
+                          className={cn(
+                            'px-3 py-1.5 rounded-xl text-xs font-bold border-2 transition-all',
+                            canalVente === c
+                              ? 'bg-emerald-500 text-white border-emerald-500'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-emerald-300'
+                          )}
+                        >
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* ── Section B: Payment method ── */}
                 <div className="px-6 py-5 border-b border-slate-100">

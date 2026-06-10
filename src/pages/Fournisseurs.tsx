@@ -11,9 +11,9 @@ import {
   CheckCircle2,
   Phone,
   MapPin,
-  Badge,
   Eye,
-  ShieldOff,
+  AlertTriangle,
+  Clock,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -31,6 +31,8 @@ interface Fournisseur {
   irc?: string | null;
   ice?: string | null;
   cin?: string | null;
+  date_echeance_paiement?: string | null;
+  notes?: string | null;
   _totalAchats?: number;
 }
 
@@ -42,6 +44,8 @@ const EMPTY_FORM = {
   irc: '',
   ice: '',
   cin: '',
+  date_echeance_paiement: '',
+  notes: '',
 };
 
 export default function Fournisseurs({ profile }: FournisseursProps) {
@@ -109,6 +113,8 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
       irc: f.irc || '',
       ice: f.ice || '',
       cin: f.cin || '',
+      date_echeance_paiement: f.date_echeance_paiement || '',
+      notes: f.notes || '',
     });
     setShowModal(true);
   };
@@ -125,6 +131,8 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
         irc: form.type === 'Société' ? (form.irc.trim() || null) : null,
         ice: form.type === 'Société' ? (form.ice.trim() || null) : null,
         cin: form.type === 'Personne physique' ? (form.cin.trim() || null) : null,
+        date_echeance_paiement: form.date_echeance_paiement.trim() || null,
+        notes: form.notes.trim() || null,
       };
 
       if (editingId) {
@@ -243,6 +251,7 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
                     <th className="px-5 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Fournisseur</th>
                     <th className="px-5 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Contact</th>
                     <th className="px-5 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Identifiants</th>
+                    <th className="px-5 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Échéance</th>
                     <th className="px-5 py-3 text-right text-[10px] font-black text-slate-400 uppercase tracking-widest">Total achats</th>
                     {isAdmin && (
                       <th className="px-5 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">Actions</th>
@@ -304,6 +313,24 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
                               : <span className="text-slate-300">—</span>}
                           </div>
                         )}
+                      </td>
+                      {/* Échéance */}
+                      <td className="px-5 py-4">
+                        {f.date_echeance_paiement ? (() => {
+                          const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
+                          const diff = Math.ceil((new Date(f.date_echeance_paiement).getTime() - new Date(today).getTime()) / 86400000);
+                          const isOverdue = diff < 0;
+                          const isSoon = diff >= 0 && diff <= 7;
+                          return (
+                            <div className={cn(
+                              'flex items-center gap-1.5 px-2 py-1 rounded-lg w-fit text-xs font-bold',
+                              isOverdue ? 'bg-rose-100 text-rose-700' : isSoon ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-700'
+                            )}>
+                              {isOverdue ? <AlertTriangle className="h-3 w-3" /> : <Clock className="h-3 w-3" />}
+                              {isOverdue ? `${Math.abs(diff)}j échu` : isSoon ? `${diff}j` : new Date(f.date_echeance_paiement).toLocaleDateString('fr-FR')}
+                            </div>
+                          );
+                        })() : <span className="text-slate-300 text-xs">—</span>}
                       </td>
                       {/* Total achats */}
                       <td className="px-5 py-4 text-right">
@@ -446,6 +473,29 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
                       value={form.cin} onChange={(e) => setForm({ ...form, cin: e.target.value })} />
                   </div>
                 )}
+
+                {/* Échéance paiement */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Date d'échéance paiement</label>
+                  <input
+                    type="date"
+                    className="w-full bg-slate-50 border-none rounded-xl py-3 px-4 text-sm font-bold focus:ring-2 focus:ring-blue-500/20"
+                    value={form.date_echeance_paiement}
+                    onChange={(e) => setForm({ ...form, date_echeance_paiement: e.target.value })}
+                  />
+                </div>
+
+                {/* Notes */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Notes</label>
+                  <textarea
+                    rows={2}
+                    className="w-full bg-slate-50 border-none rounded-xl py-3 px-4 text-sm font-medium resize-none focus:ring-2 focus:ring-blue-500/20"
+                    placeholder="Remarques, conditions de livraison..."
+                    value={form.notes}
+                    onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                  />
+                </div>
 
                 <div className="pt-4 border-t border-slate-200 flex justify-end gap-3">
                   <button type="button" onClick={() => setShowModal(false)}

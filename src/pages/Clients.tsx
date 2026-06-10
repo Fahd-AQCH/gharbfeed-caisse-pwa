@@ -1,9 +1,25 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Client, UserProfile } from '../types';
 import { supabase } from '../supabase';
-import { Users, Plus, Search, User, Phone, MapPin, Briefcase, Edit2, X, Loader2 } from 'lucide-react';
+import { Users, Plus, Search, User, Phone, MapPin, Briefcase, Edit2, X, Loader2, Eye, TrendingUp, CreditCard, ShoppingBag } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
+
+interface ClientAccount {
+  clientId: number;
+  clientName: string;
+  totalAchats: number;
+  totalPaye: number;
+  soldeRestant: number;
+  nbOperations: number;
+  recentOps: Array<{
+    numOp: number;
+    dateOp: string;
+    totalDh: number;
+    resteAPayer: number;
+    statutPaiement?: string;
+  }>;
+}
 
 interface ClientsProps {
   profile: UserProfile | null;
@@ -16,7 +32,11 @@ export default function Clients({ profile }: ClientsProps) {
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  
+
+  // Client account modal
+  const [accountModal, setAccountModal] = useState<ClientAccount | null>(null);
+  const [loadingAccount, setLoadingAccount] = useState(false);
+
   const [newClient, setNewClient] = useState({
     name: "",
     phone: "",
@@ -87,6 +107,47 @@ export default function Clients({ profile }: ClientsProps) {
       setSaving(false);
     }
   };
+
+  const openAccountModal = useCallback(async (client: Client) => {
+    setLoadingAccount(true);
+    setAccountModal(null);
+    try {
+      const clientId = parseInt(client.id);
+      const { data: opsData } = await supabase
+        .from('operations')
+        .select('num_op, date_op, total_dh, montant_paye, reste_a_payer, statut_paiement')
+        .eq('client_id', clientId)
+        .in('type_op', ['vente'])
+        .eq('statut', 'valide')
+        .order('num_op', { ascending: false })
+        .limit(20);
+
+      const ops = opsData || [];
+      const totalAchats = ops.reduce((s: number, op: any) => s + parseFloat(op.total_dh || 0), 0);
+      const totalPaye = ops.reduce((s: number, op: any) => s + parseFloat(op.montant_paye || 0), 0);
+      const soldeRestant = ops.reduce((s: number, op: any) => s + parseFloat(op.reste_a_payer || 0), 0);
+
+      setAccountModal({
+        clientId,
+        clientName: client.name,
+        totalAchats,
+        totalPaye,
+        soldeRestant,
+        nbOperations: ops.length,
+        recentOps: ops.map((op: any) => ({
+          numOp: op.num_op,
+          dateOp: op.date_op,
+          totalDh: parseFloat(op.total_dh || 0),
+          resteAPayer: parseFloat(op.reste_a_payer || 0),
+          statutPaiement: op.statut_paiement,
+        })),
+      });
+    } catch (err) {
+      console.error('[Clients] account:', err);
+    } finally {
+      setLoadingAccount(false);
+    }
+  }, []);
 
   const handleEditClick = (client: Client) => {
     setEditingClientId(client.id);
@@ -174,9 +235,15 @@ export default function Clients({ profile }: ClientsProps) {
                 </div>
               </div>
 
-              <div className="mt-6 pt-6 border-t border-slate-100 flex items-center justify-between">
-                <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Partenaire GFeed</span>
-                <button 
+              <div className="mt-6 pt-6 border-t border-slate-100 flex items-center justify-between gap-2">
+                <button
+                  onClick={() => openAccountModal(client)}
+                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-xl transition-all"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  Voir compte
+                </button>
+                <button
                   onClick={() => handleEditClick(client)}
                   className="h-10 w-10 flex items-center justify-center rounded-xl bg-slate-50 text-slate-400 hover:bg-emerald-500 hover:text-white transition-all"
                   title="Modifier"
@@ -315,6 +382,108 @@ export default function Clients({ profile }: ClientsProps) {
         )}
       </AnimatePresence>
     </div>
+
+    {/* ── Client Account Modal ── */}
+    <AnimatePresence>
+      {(loadingAccount || accountModal) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            onClick={() => { setAccountModal(null); setLoadingAccount(false); }}
+            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+          />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 20 }}
+            className="relative w-full max-w-xl bg-white rounded-[28px] shadow-2xl overflow-hidden"
+          >
+            <div className="p-6 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 uppercase tracking-tight flex items-center gap-2">
+                  <User className="h-5 w-5 text-blue-500" />
+                  {accountModal?.clientName || '…'}
+                </h3>
+                <p className="text-xs text-slate-500 font-medium mt-0.5">Compte client — {accountModal?.nbOperations ?? 0} opération(s)</p>
+              </div>
+              <button
+                onClick={() => { setAccountModal(null); setLoadingAccount(false); }}
+                className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-slate-900"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {loadingAccount && !accountModal ? (
+              <div className="flex items-center justify-center py-16">
+                <div className="h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : accountModal ? (
+              <div className="p-6 space-y-5">
+                {/* KPI row */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-slate-50 rounded-2xl p-4 text-center border border-slate-100">
+                    <div className="flex items-center justify-center mb-1">
+                      <ShoppingBag className="h-4 w-4 text-blue-500" />
+                    </div>
+                    <p className="text-lg font-black text-slate-900">{accountModal.totalAchats.toFixed(0)}<span className="text-xs font-bold text-slate-400 ml-0.5">DH</span></p>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Total achats</p>
+                  </div>
+                  <div className="bg-emerald-50 rounded-2xl p-4 text-center border border-emerald-100">
+                    <div className="flex items-center justify-center mb-1">
+                      <TrendingUp className="h-4 w-4 text-emerald-500" />
+                    </div>
+                    <p className="text-lg font-black text-emerald-700">{accountModal.totalPaye.toFixed(0)}<span className="text-xs font-bold text-emerald-400 ml-0.5">DH</span></p>
+                    <p className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mt-1">Total payé</p>
+                  </div>
+                  <div className={cn('rounded-2xl p-4 text-center border', accountModal.soldeRestant > 0 ? 'bg-rose-50 border-rose-100' : 'bg-slate-50 border-slate-100')}>
+                    <div className="flex items-center justify-center mb-1">
+                      <CreditCard className={cn('h-4 w-4', accountModal.soldeRestant > 0 ? 'text-rose-500' : 'text-slate-400')} />
+                    </div>
+                    <p className={cn('text-lg font-black', accountModal.soldeRestant > 0 ? 'text-rose-700' : 'text-slate-500')}>
+                      {accountModal.soldeRestant.toFixed(0)}<span className="text-xs font-bold ml-0.5">DH</span>
+                    </p>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Solde dû</p>
+                  </div>
+                </div>
+
+                {/* Recent operations */}
+                <div>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Dernières opérations</p>
+                  {accountModal.recentOps.length === 0 ? (
+                    <p className="text-xs text-slate-400 font-medium italic">Aucune opération trouvée.</p>
+                  ) : (
+                    <div className="space-y-2 max-h-52 overflow-y-auto">
+                      {accountModal.recentOps.map((op) => (
+                        <div key={op.numOp} className="flex items-center justify-between bg-slate-50 rounded-xl px-4 py-2.5 border border-slate-100">
+                          <div>
+                            <p className="text-xs font-black text-slate-700">
+                              OP-{String(op.numOp).padStart(4, '0')}
+                            </p>
+                            <p className="text-[10px] text-slate-400 font-medium">
+                              {op.dateOp ? new Date(op.dateOp).toLocaleDateString('fr-FR') : '—'}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-black text-slate-900">{op.totalDh.toFixed(2)} DH</p>
+                            {op.resteAPayer > 0.01 && (
+                              <p className="text-[10px] font-bold text-rose-600">Reste: {op.resteAPayer.toFixed(2)} DH</p>
+                            )}
+                            {op.resteAPayer <= 0.01 && op.statutPaiement === 'Payé' && (
+                              <p className="text-[10px] font-bold text-emerald-600">Soldé</p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
     </div>
   );
 }

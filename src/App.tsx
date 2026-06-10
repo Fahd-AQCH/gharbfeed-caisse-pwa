@@ -18,6 +18,7 @@ import History from './pages/History';
 import Admin from './pages/Admin';
 import Fournisseurs from './pages/Fournisseurs';
 import Debts from './pages/Debts';
+import Expenses from './pages/Expenses';
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
 import { AnimatePresence } from 'motion/react';
@@ -100,7 +101,7 @@ export default function App() {
 
         if (userData) {
           const rawRole = userData.role_id || userData.role || 'caissier';
-          const roleId = rawRole === 'admin' ? 'admin' : 'cashier';
+          const roleId = rawRole === 'admin' ? 'admin' : rawRole === 'tresorier' ? 'tresorier' : 'cashier';
           const isActive =
             userData.is_active !== undefined
               ? userData.is_active
@@ -228,6 +229,7 @@ export default function App() {
                   <Route path="/history" element={<History profile={profile} />} />
                   <Route path="/fournisseurs" element={<Fournisseurs profile={profile} />} />
                   <Route path="/debts" element={<Debts profile={profile} />} />
+                  <Route path="/expenses" element={<Expenses profile={profile} />} />
                   <Route path="/admin" element={<Admin profile={profile} />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
