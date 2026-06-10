@@ -333,22 +333,25 @@ export default function Inventory({ profile }: InventoryProps) {
   const handleExportStock = () => {
     const rows = sortedProducts.map(p => {
       const raw = rawProdsRef.current.find(r => r.code === p.code);
-      return {
+      const base: Record<string, string | number> = {
         'Code': p.code,
         'Produit': p.name,
         'Catégorie': p.categoryId || '—',
         'Prix Vente (DH)': p.defaultPrice.toFixed(2),
-        'Prix Achat (DH)': ((raw?.pdat) ?? 0).toFixed(2),
-        'Qté Achetée': parseFloat(raw?.qte_achat ?? 0),
-        'Qté Vendue': parseFloat(raw?.qte_vente ?? 0),
-        'Stock Disponible': p.stockActual,
-        'Valeur Stock (DH)': (p.stockActual * p.defaultPrice).toFixed(2),
-        'Seuil Alerte': p.seuilAlerte ?? 10,
       };
+      // Confidentialité : le prix d'achat n'est exporté que pour l'admin
+      if (isAdmin) base['Prix Achat (DH)'] = ((raw?.pdat) ?? 0).toFixed(2);
+      base['Qté Achetée'] = parseFloat(raw?.qte_achat ?? 0);
+      base['Qté Vendue'] = parseFloat(raw?.qte_vente ?? 0);
+      base['Stock Disponible'] = p.stockActual;
+      base['Valeur Stock (DH)'] = (p.stockActual * p.defaultPrice).toFixed(2);
+      base['Seuil Alerte'] = p.seuilAlerte ?? 10;
+      return base;
     });
     const ws = XLSX.utils.json_to_sheet(rows);
     ws['!cols'] = [
-      { wch: 10 }, { wch: 30 }, { wch: 18 }, { wch: 14 }, { wch: 14 },
+      { wch: 10 }, { wch: 30 }, { wch: 18 }, { wch: 14 },
+      ...(isAdmin ? [{ wch: 14 }] : []),
       { wch: 13 }, { wch: 13 }, { wch: 16 }, { wch: 16 }, { wch: 13 },
     ];
     const wb = XLSX.utils.book_new();

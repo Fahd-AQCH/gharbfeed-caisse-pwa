@@ -19,6 +19,10 @@ import {
   List,
   History,
   ChevronRight,
+  MessageCircle,
+  Edit2,
+  ArrowUpDown,
+  Crown,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -36,6 +40,7 @@ interface DebtOp {
   typeOp: string;
   clientId?: number;
   clientName?: string;
+  clientPhone?: string;
   totalDh: number;
   montantPaye: number;
   resteAPayer: number;
@@ -47,9 +52,12 @@ interface DebtOp {
 }
 
 type TabId = 'dashboard' | 'actives' | 'historique';
+type SortKey = 'echeance' | 'montant' | 'client' | 'date';
 
 export default function Debts({ profile }: DebtsProps) {
   const isAdmin = profile?.roleId === 'admin';
+  // Le trésorier gère les créances au même titre que l'admin (rôle financier)
+  const canManage = isAdmin || profile?.roleId === 'tresorier';
 
   const [activeTab, setActiveTab] = useState<TabId>('dashboard');
 
@@ -60,6 +68,12 @@ export default function Debts({ profile }: DebtsProps) {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [paymentHistories, setPaymentHistories] = useState<Record<number, DebtPayment[]>>({});
   const [loadingHistory, setLoadingHistory] = useState<Record<number, boolean>>({});
+  const [sortBy, setSortBy] = useState<SortKey>('echeance');
+  const [showOverdueOnly, setShowOverdueOnly] = useState(false);
+
+  // Édition inline de l'échéance (admin / trésorier)
+  const [editingEcheanceId, setEditingEcheanceId] = useState<number | null>(null);
+  const [echeanceDraft, setEcheanceDraft] = useState('');
 
   // ── Debt history (tab 3) ────────────────────────────────────────────────────
   const [debtHistory, setDebtHistory] = useState<DebtOp[]>([]);
@@ -84,12 +98,16 @@ export default function Debts({ profile }: DebtsProps) {
     if (!opsData?.length) return [];
     const clientIds = [...new Set(opsData.map((op: any) => op.client_id).filter(Boolean))];
     const clientMap: Record<string, string> = {};
+    const phoneMap: Record<string, string> = {};
     if (clientIds.length > 0) {
       const { data: clients } = await supabase
         .from('clients')
-        .select('id_client, nom_prenom')
+        .select('id_client, nom_prenom, num_telephone')
         .in('id_client', clientIds);
-      (clients || []).forEach((c: any) => { clientMap[String(c.id_client)] = c.nom_prenom; });
+      (clients || []).forEach((c: any) => {
+        clientMap[String(c.id_client)] = c.nom_prenom;
+        if (c.num_telephone) phoneMap[String(c.id_client)] = c.num_telephone;
+      });
     }
     return opsData.map((op: any) => {
       const echeance = op.date_echeance || null;
@@ -105,6 +123,7 @@ export default function Debts({ profile }: DebtsProps) {
         typeOp: op.type_op || 'vente',
         clientId: op.client_id ?? undefined,
         clientName: op.client_id ? (clientMap[String(op.client_id)] || `#${op.client_id}`) : 'Comptoir',
+        clientPhone: op.client_id ? phoneMap[String(op.client_id)] : undefined,
         totalDh: parseFloat(op.total_dh || 0),
         montantPaye: parseFloat(op.montant_paye || 0),
         resteAPayer: parseFloat(op.reste_a_payer || 0),
@@ -291,12 +310,90 @@ export default function Debts({ profile }: DebtsProps) {
     }
   };
 
+  // ── Relance WhatsApp (numéros marocains 06… → 2126…) ───────────────────────
+  const buildWhatsAppLink = (debt: DebtOp): string | null => {
+    if (!debt.clientPhone) return null;
+    let digits = debt.clientPhone.replace(/\D/g, '');
+    if (!digits) return null;
+    if (digits.startsWith('0')) digits = '212' + digits.slice(1);
+    else if (!digits.startsWith('212')) digits = '212' + digits;
+    const msg =
+      `Bonjour ${debt.clientName}, nous vous rappelons aimablement qu'un solde de ` +
+      `${debt.resteAPayer.toFixed(2)} DH reste dû sur l'opération ${debt.operationNumber}` +
+      (debt.dateEcheance ? ` (échéance : ${new Date(debt.dateEcheance).toLocaleDateString('fr-FR')})` : '') +
+      `. Merci de régulariser auprès de GharbFeed. 🙏`;
+    return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
+  };
+
+  // ── Édition échéance ────────────────────────────────────────────────────────
+  const handleSaveEcheance = async (debt: DebtOp) => {
+    try {
+      const { error } = await supabase
+        .from('operations')
+        .update({ date_echeance: echeanceDraft || null })
+        .eq('num_op', debt.numOp);
+      if (error) throw error;
+      setEditingEcheanceId(null);
+      setEcheanceDraft('');
+      fetchDebts();
+    } catch (err) {
+      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
   // ── Derived values ─────────────────────────────────────────────────────────
   const filteredActive = debtOps.filter((d) => {
+    if (showOverdueOnly && !d.isOverdue) return false;
     if (!clientSearch.trim()) return true;
     const q = clientSearch.toLowerCase();
     return (d.clientName || '').toLowerCase().includes(q) || d.operationNumber.toLowerCase().includes(q);
   });
+
+  const sortedActive = [...filteredActive].sort((a, b) => {
+    switch (sortBy) {
+      case 'montant': return b.resteAPayer - a.resteAPayer;
+      case 'client':  return (a.clientName || '').localeCompare(b.clientName || '', 'fr');
+      case 'date':    return (a.dateOp || '').localeCompare(b.dateOp || '');
+      case 'echeance':
+      default: {
+        // Échéances les plus urgentes d'abord — sans échéance en dernier
+        const ea = a.dateEcheance || '9999-12-31';
+        const eb = b.dateEcheance || '9999-12-31';
+        return ea.localeCompare(eb);
+      }
+    }
+  });
+
+  // ── Balance âgée (ancienneté par date d'opération) ──────────────────────────
+  const ageInDays = (d: DebtOp) =>
+    d.dateOp ? Math.floor((new Date(todayStr).getTime() - new Date(d.dateOp).getTime()) / 86400000) : 0;
+
+  const agingBuckets = [
+    { label: '0–30 j',  color: 'bg-emerald-500', text: 'text-emerald-700', test: (n: number) => n <= 30 },
+    { label: '31–60 j', color: 'bg-amber-400',   text: 'text-amber-700',   test: (n: number) => n > 30 && n <= 60 },
+    { label: '61–90 j', color: 'bg-orange-500',  text: 'text-orange-700',  test: (n: number) => n > 60 && n <= 90 },
+    { label: '+90 j',   color: 'bg-rose-500',    text: 'text-rose-700',    test: (n: number) => n > 90 },
+  ].map((bucket) => {
+    const ops = debtOps.filter((d) => bucket.test(ageInDays(d)));
+    return { ...bucket, total: ops.reduce((s, d) => s + d.resteAPayer, 0), count: ops.length };
+  });
+
+  // ── Top 5 débiteurs ─────────────────────────────────────────────────────────
+  const debtorMap = debtOps.reduce<Record<string, { name: string; total: number; count: number; hasOverdue: boolean }>>(
+    (acc, d) => {
+      const key = d.clientName || 'Comptoir';
+      if (!acc[key]) acc[key] = { name: key, total: 0, count: 0, hasOverdue: false };
+      acc[key].total += d.resteAPayer;
+      acc[key].count += 1;
+      acc[key].hasOverdue = acc[key].hasOverdue || d.isOverdue;
+      return acc;
+    },
+    {}
+  );
+  const topDebtors = Object.keys(debtorMap)
+    .map((k) => debtorMap[k])
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 5);
 
   const filteredHistory = debtHistory.filter((d) => {
     if (!historyClientSearch.trim()) return true;
@@ -315,7 +412,8 @@ export default function Debts({ profile }: DebtsProps) {
     onPay?: (d: DebtOp) => void;
     expandedId: number | null;
     onToggle: (id: number) => void;
-  }> = ({ debt, onPay, expandedId, onToggle }) => (
+    manageable?: boolean;
+  }> = ({ debt, onPay, expandedId, onToggle, manageable = false }) => (
     <div className={cn('bg-white rounded-2xl border shadow-sm overflow-hidden transition-all', debt.isOverdue ? 'border-rose-300' : 'border-slate-200')}>
       <div
         className={cn('flex items-center gap-4 px-5 py-4 cursor-pointer hover:bg-slate-50/50 transition-colors', debt.isOverdue && 'bg-rose-50/30')}
@@ -346,10 +444,40 @@ export default function Debts({ profile }: DebtsProps) {
             <p className="text-xs text-slate-400 font-medium">
               {debt.dateOp ? new Date(debt.dateOp).toLocaleDateString('fr-FR') : '—'}
             </p>
-            {debt.dateEcheance && (
-              <p className={cn('text-xs font-bold', debt.isOverdue ? 'text-rose-600' : 'text-slate-500')}>
-                Échéance : {new Date(debt.dateEcheance).toLocaleDateString('fr-FR')}
-              </p>
+            {editingEcheanceId === debt.numOp ? (
+              <span className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="date"
+                  value={echeanceDraft}
+                  onChange={(e) => setEcheanceDraft(e.target.value)}
+                  className="text-xs font-bold border border-slate-300 rounded-lg px-2 py-0.5 focus:ring-2 focus:ring-rose-400/30"
+                />
+                <button onClick={() => handleSaveEcheance(debt)} className="p-1 text-emerald-600 hover:bg-emerald-50 rounded-lg" title="Enregistrer">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                </button>
+                <button onClick={() => { setEditingEcheanceId(null); setEcheanceDraft(''); }} className="p-1 text-slate-400 hover:bg-slate-100 rounded-lg" title="Annuler">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            ) : (
+              <span className="flex items-center gap-1">
+                {debt.dateEcheance ? (
+                  <p className={cn('text-xs font-bold', debt.isOverdue ? 'text-rose-600' : 'text-slate-500')}>
+                    Échéance : {new Date(debt.dateEcheance).toLocaleDateString('fr-FR')}
+                  </p>
+                ) : manageable ? (
+                  <p className="text-xs font-medium text-slate-300 italic">Sans échéance</p>
+                ) : null}
+                {manageable && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setEditingEcheanceId(debt.numOp); setEcheanceDraft(debt.dateEcheance || ''); }}
+                    className="p-1 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all"
+                    title="Modifier l'échéance"
+                  >
+                    <Edit2 className="h-3 w-3" />
+                  </button>
+                )}
+              </span>
             )}
           </div>
         </div>
@@ -360,7 +488,21 @@ export default function Debts({ profile }: DebtsProps) {
           <p className="text-[10px] text-slate-400 font-medium">Payé : {debt.montantPaye.toFixed(2)} / {debt.totalDh.toFixed(2)} DH</p>
         </div>
         <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-          {onPay && isAdmin && debt.resteAPayer > 0.01 && (
+          {manageable && debt.resteAPayer > 0.01 && (() => {
+            const wa = buildWhatsAppLink(debt);
+            return wa ? (
+              <a
+                href={wa}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="p-2 bg-green-50 hover:bg-green-100 text-green-600 rounded-xl transition-all border border-green-200"
+                title={`Relancer ${debt.clientName} sur WhatsApp`}
+              >
+                <MessageCircle className="h-4 w-4" />
+              </a>
+            ) : null;
+          })()}
+          {onPay && canManage && debt.resteAPayer > 0.01 && (
             <button onClick={() => onPay(debt)} className="flex items-center gap-1.5 px-3 py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl transition-all shadow-sm shadow-emerald-500/20">
               <Plus className="h-3.5 w-3.5" /> Paiement
             </button>
@@ -522,6 +664,88 @@ export default function Debts({ profile }: DebtsProps) {
               </div>
             </div>
 
+            {/* Balance âgée + Top débiteurs */}
+            {debtOps.length > 0 && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {/* ── Balance âgée ── */}
+                <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Clock className="h-4 w-4 text-slate-400" />
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Balance âgée des créances</p>
+                  </div>
+                  {/* Barre empilée */}
+                  <div className="h-3 rounded-full overflow-hidden flex bg-slate-100 mb-4">
+                    {agingBuckets.map((b) =>
+                      b.total > 0 ? (
+                        <div
+                          key={b.label}
+                          className={cn('h-full transition-all', b.color)}
+                          style={{ width: `${(b.total / Math.max(totalDu, 0.01)) * 100}%` }}
+                          title={`${b.label} : ${b.total.toFixed(2)} DH`}
+                        />
+                      ) : null
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {agingBuckets.map((b) => (
+                      <div key={b.label} className="bg-slate-50 rounded-xl p-2.5 border border-slate-100">
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <span className={cn('h-2 w-2 rounded-full', b.color)} />
+                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-wider">{b.label}</span>
+                        </div>
+                        <p className={cn('text-sm font-black', b.total > 0 ? b.text : 'text-slate-300')}>
+                          {b.total.toFixed(0)} <span className="text-[9px] font-bold text-slate-400">DH</span>
+                        </p>
+                        <p className="text-[9px] text-slate-400 font-medium">{b.count} créance(s)</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* ── Top 5 débiteurs ── */}
+                <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Crown className="h-4 w-4 text-amber-400" />
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Top 5 débiteurs</p>
+                  </div>
+                  <div className="space-y-2.5">
+                    {topDebtors.map((d, i) => (
+                      <button
+                        key={d.name}
+                        onClick={() => { setClientSearch(d.name); setActiveTab('actives'); }}
+                        className="w-full flex items-center gap-3 group text-left"
+                        title={`Voir les créances de ${d.name}`}
+                      >
+                        <span className={cn(
+                          'h-6 w-6 rounded-lg flex items-center justify-center text-[10px] font-black shrink-0',
+                          i === 0 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'
+                        )}>
+                          {i + 1}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-black text-slate-700 truncate group-hover:text-rose-600 transition-colors">
+                              {d.name}
+                              {d.hasOverdue && <AlertTriangle className="inline h-3 w-3 text-rose-500 ml-1 mb-0.5" />}
+                            </p>
+                            <p className="text-xs font-black text-rose-600 shrink-0">{d.total.toFixed(0)} DH</p>
+                          </div>
+                          <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
+                            <div
+                              className="h-full bg-rose-400 rounded-full transition-all"
+                              style={{ width: `${(d.total / Math.max(topDebtors[0]?.total ?? 1, 0.01)) * 100}%` }}
+                            />
+                          </div>
+                          <p className="text-[9px] text-slate-400 font-medium mt-0.5">{d.count} créance(s)</p>
+                        </div>
+                        <ChevronRight className="h-4 w-4 text-slate-200 group-hover:text-rose-400 transition-colors shrink-0" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Quick action: go to actives if any */}
             {debtOps.length > 0 ? (
               <button
@@ -554,38 +778,77 @@ export default function Debts({ profile }: DebtsProps) {
         {/* ── TAB 2: Active debts ── */}
         {activeTab === 'actives' && (
           <>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Filtrer par client ou numéro d'opération..."
-                className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-rose-500/10 transition-all"
-                value={clientSearch}
-                onChange={(e) => setClientSearch(e.target.value)}
-              />
+            <div className="flex flex-col lg:flex-row gap-3">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Filtrer par client ou numéro d'opération..."
+                  className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-rose-500/10 transition-all"
+                  value={clientSearch}
+                  onChange={(e) => setClientSearch(e.target.value)}
+                />
+              </div>
+
+              {/* Tri */}
+              <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-xl px-3 py-2">
+                <ArrowUpDown className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                {([
+                  { key: 'echeance', label: 'Échéance' },
+                  { key: 'montant',  label: 'Montant' },
+                  { key: 'client',   label: 'Client' },
+                  { key: 'date',     label: 'Ancienneté' },
+                ] as { key: SortKey; label: string }[]).map((s) => (
+                  <button
+                    key={s.key}
+                    onClick={() => setSortBy(s.key)}
+                    className={cn(
+                      'px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all',
+                      sortBy === s.key ? 'bg-rose-500 text-white' : 'text-slate-500 hover:bg-slate-50'
+                    )}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Filtre échues */}
+              <button
+                onClick={() => setShowOverdueOnly((v) => !v)}
+                className={cn(
+                  'flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border transition-all',
+                  showOverdueOnly
+                    ? 'bg-rose-500 text-white border-rose-500 shadow-sm shadow-rose-500/20'
+                    : 'bg-white text-slate-500 border-slate-200 hover:border-rose-300'
+                )}
+              >
+                <AlertTriangle className="h-3.5 w-3.5" />
+                Échues{nbOverdue > 0 ? ` (${nbOverdue})` : ''}
+              </button>
             </div>
 
             {loading ? (
               <div className="flex items-center justify-center py-20">
                 <div className="h-8 w-8 border-4 border-rose-500 border-t-transparent rounded-full animate-spin" />
               </div>
-            ) : filteredActive.length === 0 ? (
+            ) : sortedActive.length === 0 ? (
               <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center">
                 <div className="h-16 w-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-4">
                   <CheckCircle2 className="h-8 w-8 text-emerald-500" />
                 </div>
-                <p className="text-xl font-black text-slate-900">{clientSearch ? 'Aucun résultat' : 'Aucune créance active !'}</p>
-                <p className="text-sm text-slate-400 font-medium mt-1">{clientSearch ? 'Essayez un autre terme.' : 'Tous les comptes sont soldés.'}</p>
+                <p className="text-xl font-black text-slate-900">{clientSearch || showOverdueOnly ? 'Aucun résultat' : 'Aucune créance active !'}</p>
+                <p className="text-sm text-slate-400 font-medium mt-1">{clientSearch || showOverdueOnly ? 'Modifiez vos filtres.' : 'Tous les comptes sont soldés.'}</p>
               </div>
             ) : (
               <div className="space-y-3">
-                {filteredActive.map((debt) => (
+                {sortedActive.map((debt) => (
                   <DebtRow
                     key={debt.numOp}
                     debt={debt}
                     onPay={openPaymentModal}
                     expandedId={expandedId}
                     onToggle={handleToggleExpand}
+                    manageable={canManage}
                   />
                 ))}
               </div>

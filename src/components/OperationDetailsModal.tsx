@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Operation, OperationItem, Product, UserProfile } from '../types';
 import { supabase } from '../supabase';
-import { X, CheckCircle2, Printer, ShieldCheck, Clock, RotateCcw, AlertTriangle } from 'lucide-react';
+import { X, CheckCircle2, Printer, ShieldCheck, Clock, RotateCcw, AlertTriangle, Lock } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion } from 'motion/react';
 import { generateTicketPDF, TicketItem, TicketOperation } from '../utils/pdfGenerator';
@@ -37,6 +37,7 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
   const [creatingReturn, setCreatingReturn] = useState(false);
 
   const isAdmin = profile?.roleId === 'admin';
+  const isCashier = profile?.roleId === 'cashier';
 
   const isAchat = operation.type === 'achat' || (operation as any).type_op === 'achat';
 
@@ -50,6 +51,12 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
 
   const isRetourFournisseur =
     operation.type === 'retour_fournisseur' || (operation as any).type_op === 'retour_fournisseur';
+
+  // Confidentialité prix d'achat : opérations achat ET retour fournisseur
+  // → prix unitaires visibles admin seulement ; pour un caissier, on masque
+  //   aussi les totaux (qui permettraient de déduire le prix unitaire)
+  const isAchatLike = isAchat || isRetourFournisseur;
+  const hidePurchaseAmounts = isAchatLike && isCashier;
 
   const isValidatedSale =
     (operation.type === 'vente' || (operation as any).type_op === 'vente') &&
@@ -480,7 +487,7 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
             </h3>
           </div>
           <div className="flex items-center gap-2">
-            {!isPendingPurchase && (
+            {!isPendingPurchase && !hidePurchaseAmounts && (
               <button onClick={handlePrint} className="p-2 hover:bg-slate-200 text-slate-500 rounded-xl transition-all" title="Imprimer Ticket PDF">
                 <Printer className="h-5 w-5" />
               </button>
@@ -693,18 +700,20 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                     <tr>
                       <th className="px-4 py-3 font-bold text-slate-500 uppercase text-[10px] tracking-widest">Produit</th>
                       <th className="px-4 py-3 font-bold text-slate-500 uppercase text-[10px] tracking-widest">QTE</th>
-                      {(!isAchat || isAdmin) && (
+                      {(!isAchatLike || isAdmin) && (
                         <th className="px-4 py-3 font-bold text-slate-500 uppercase text-[10px] tracking-widest text-right">
                           {isPendingPurchase ? 'Prix Achat (DH)' : 'Prix U. (DH)'}
                         </th>
                       )}
-                      <th className="px-4 py-3 font-bold text-slate-500 uppercase text-[10px] tracking-widest text-right">Total (DH)</th>
+                      {!hidePurchaseAmounts && (
+                        <th className="px-4 py-3 font-bold text-slate-500 uppercase text-[10px] tracking-widest text-right">Total (DH)</th>
+                      )}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {items.length === 0 ? (
                       <tr>
-                        <td colSpan={4} className="px-4 py-8 text-center text-slate-400 font-bold">Aucun article trouvé</td>
+                        <td colSpan={hidePurchaseAmounts ? 2 : 4} className="px-4 py-8 text-center text-slate-400 font-bold">Aucun article trouvé</td>
                       </tr>
                     ) : items.map((item) => {
                       const p = products.find((pr) => pr.id === item.productId);
@@ -726,7 +735,7 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                               item.quantity
                             )}
                           </td>
-                          {(!isAchat || isAdmin) && (
+                          {(!isAchatLike || isAdmin) && (
                             <td className="px-4 py-3 text-right">
                               {(isPendingPurchase && isAdmin) ? (
                                 <div className="flex flex-col items-end gap-0.5">
@@ -749,7 +758,9 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                               )}
                             </td>
                           )}
-                          <td className="px-4 py-3 font-black text-slate-900 text-right">{item.lineTotal.toFixed(2)}</td>
+                          {!hidePurchaseAmounts && (
+                            <td className="px-4 py-3 font-black text-slate-900 text-right">{item.lineTotal.toFixed(2)}</td>
+                          )}
                         </tr>
                       );
                     })}
@@ -789,24 +800,33 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                     </button>
                   )}
                 </div>
-                <div className="w-64 space-y-2 bg-slate-50 p-4 rounded-2xl border border-slate-200">
-                  <div className="flex justify-between items-center text-sm font-bold text-slate-600">
-                    <span>Sous-total:</span>
-                    <span>{grossTotal.toFixed(2)} DH</span>
+                {hidePurchaseAmounts ? (
+                  <div className="w-64 bg-slate-50 p-4 rounded-2xl border border-slate-200 flex items-center gap-3">
+                    <Lock className="h-4 w-4 text-slate-400 shrink-0" />
+                    <p className="text-xs font-bold text-slate-500">
+                      Montants confidentiels — réservés à l'administration.
+                    </p>
                   </div>
-                  {(operation.discountAmount ?? 0) > 0 && (
-                    <div className="flex justify-between items-center text-sm font-bold text-emerald-600">
-                      <span>Remise:</span>
-                      <span>-{(operation.discountAmount ?? 0).toFixed(2)} DH</span>
+                ) : (
+                  <div className="w-64 space-y-2 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                    <div className="flex justify-between items-center text-sm font-bold text-slate-600">
+                      <span>Sous-total:</span>
+                      <span>{grossTotal.toFixed(2)} DH</span>
                     </div>
-                  )}
-                  <div className="pt-2 border-t border-slate-200 flex justify-between items-center">
-                    <span className="font-black text-slate-900">TOTAL:</span>
-                    <span className={cn('text-xl font-black', isRetour ? 'text-purple-600' : 'text-emerald-600')}>
-                      {finalTotal.toFixed(2)} DH
-                    </span>
+                    {(operation.discountAmount ?? 0) > 0 && (
+                      <div className="flex justify-between items-center text-sm font-bold text-emerald-600">
+                        <span>Remise:</span>
+                        <span>-{(operation.discountAmount ?? 0).toFixed(2)} DH</span>
+                      </div>
+                    )}
+                    <div className="pt-2 border-t border-slate-200 flex justify-between items-center">
+                      <span className="font-black text-slate-900">TOTAL:</span>
+                      <span className={cn('text-xl font-black', isRetour ? 'text-purple-600' : 'text-emerald-600')}>
+                        {finalTotal.toFixed(2)} DH
+                      </span>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
 
               {/* ── Panel Création Retour ── */}

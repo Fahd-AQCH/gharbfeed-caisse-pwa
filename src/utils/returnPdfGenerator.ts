@@ -1,18 +1,6 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-
-let _logoUrl: string | null = null;
-if (typeof window !== 'undefined') {
-  const img = new Image();
-  img.onload = () => {
-    const canvas = document.createElement('canvas');
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    const ctx = canvas.getContext('2d');
-    if (ctx) { ctx.drawImage(img, 0, 0); _logoUrl = canvas.toDataURL('image/png'); }
-  };
-  img.src = '/logo.png';
-}
+import { drawPdfLogo } from './pdfLogo';
 
 export interface RetourItem {
   productCode: string;
@@ -63,16 +51,7 @@ export function generateRetourPDF(operation: RetourOperation, items: RetourItem[
   doc.setFillColor(...COLORS.slate900);
   doc.roundedRect(margin, y, contentW, headerH, 3, 3, 'F');
 
-  if (_logoUrl) {
-    doc.addImage(_logoUrl, 'PNG', margin + 4, y + 4, 14, 14);
-  } else {
-    doc.setFillColor(...accentColor);
-    doc.roundedRect(margin + 4, y + 4, 14, 14, 2, 2, 'F');
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(...COLORS.white);
-    doc.text('GF', margin + 11, y + 12.5, { align: 'center' });
-  }
+  drawPdfLogo(doc, margin + 4, y + 4, 14, accentColor);
 
   doc.setFontSize(14);
   doc.setFont('helvetica', 'bold');

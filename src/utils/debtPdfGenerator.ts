@@ -1,4 +1,5 @@
 import jsPDF from 'jspdf';
+import { drawPdfLogo } from './pdfLogo';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface DebtPaymentReceiptData {
@@ -40,13 +41,9 @@ export function generateDebtPaymentPDF(data: DebtPaymentReceiptData): void {
   doc.setFillColor(...C.slate900);
   doc.roundedRect(margin, y, contentW, 22, 3, 3, 'F');
 
-  doc.setFillColor(...C.emerald);
-  doc.roundedRect(margin + 4, y + 4, 14, 14, 2, 2, 'F');
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.setTextColor(...C.white);
-  doc.text('GF', margin + 11, y + 12.5, { align: 'center' });
+  drawPdfLogo(doc, margin + 4, y + 4, 14, C.emerald);
 
+  doc.setFont('helvetica', 'bold');
   doc.setFontSize(13);
   doc.setTextColor(...C.white);
   doc.text('GharbFeed', margin + 22, y + 9);

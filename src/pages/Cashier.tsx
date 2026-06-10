@@ -309,6 +309,10 @@ export default function Cashier({ profile }: CashierProps) {
   const grossTotal = cart.reduce((sum, item) => sum + item.lineTotal, 0);
   const finalTotal = grossTotal - discountGlobal;
 
+  // Confidentialité prix d'achat : en mode achat, un non-admin ne voit AUCUN montant
+  // (les totaux permettraient de déduire le prix unitaire)
+  const hideAchatAmounts = operationType === 'achat' && !isAdmin;
+
   // ─── Paiement — valeurs réactives ────────────────────────────────────────
   const montantPayeNum = parseFloat(montantPaye) || 0;
   const montantSaisi = montantPaye.trim() !== '';
@@ -912,7 +916,7 @@ export default function Cashier({ profile }: CashierProps) {
           <div className="px-4 py-3 space-y-1.5">
             <div className="flex justify-between items-center text-slate-500">
               <span className="text-xs font-medium">Sous-total</span>
-              <span className="font-bold text-xs">{grossTotal.toFixed(2)} DH</span>
+              <span className="font-bold text-xs">{hideAchatAmounts ? '— DH' : `${grossTotal.toFixed(2)} DH`}</span>
             </div>
             {operationType === 'vente' && (
               <div className="flex justify-between items-center">
@@ -931,7 +935,7 @@ export default function Cashier({ profile }: CashierProps) {
             <div className="pt-1.5 border-t border-slate-100 flex justify-between items-center">
               <span className="font-black uppercase text-xs tracking-tight text-slate-700">Total</span>
               <span className={cn('text-2xl font-black', operationType === 'vente' ? 'text-emerald-600' : 'text-blue-600')}>
-                {finalTotal.toFixed(2)} <span className="text-xs font-medium">DH</span>
+                {hideAchatAmounts ? '—' : finalTotal.toFixed(2)} <span className="text-xs font-medium">DH</span>
               </span>
             </div>
           </div>
@@ -1003,7 +1007,7 @@ export default function Cashier({ profile }: CashierProps) {
                     {operationType === 'vente' ? '💳 Encaissement' : '📥 Validation Achat'}
                   </h3>
                   <p className={cn('text-xs font-bold mt-0.5', operationType === 'vente' ? 'text-emerald-700' : 'text-blue-700')}>
-                    {cart.length} article(s) · Total : {finalTotal.toFixed(2)} DH
+                    {cart.length} article(s){hideAchatAmounts ? '' : ` · Total : ${finalTotal.toFixed(2)} DH`}
                   </p>
                 </div>
                 <button
@@ -1163,15 +1167,15 @@ export default function Cashier({ profile }: CashierProps) {
                       </label>
                       <input
                         type="number" min="0" step="0.01"
-                        placeholder={`${finalTotal.toFixed(2)} DH`}
+                        placeholder={hideAchatAmounts ? 'Montant versé au fournisseur' : `${finalTotal.toFixed(2)} DH`}
                         className="w-full bg-white border-2 border-slate-200 rounded-xl py-2.5 px-4 text-base font-black text-slate-800 focus:ring-2 focus:ring-emerald-400/30 focus:border-emerald-400"
                         value={montantPaye}
                         onChange={(e) => setMontantPaye(e.target.value)}
                       />
                     </div>
 
-                    {/* Live feedback: monnaie or debt */}
-                    {montantSaisi && (
+                    {/* Live feedback: monnaie or debt — masqué en achat pour non-admin (confidentialité) */}
+                    {montantSaisi && !hideAchatAmounts && (
                       <div className={cn(
                         'rounded-xl px-4 py-2.5 flex items-center justify-between mb-3',
                         monnaieARendre > 0.005 ? 'bg-blue-50 border border-blue-200'
@@ -1337,12 +1341,15 @@ export default function Cashier({ profile }: CashierProps) {
                   <div>
                     <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Total à {operationType === 'vente' ? 'encaisser' : 'valider'}</p>
                     <p className={cn('text-3xl font-black', operationType === 'vente' ? 'text-emerald-600' : 'text-blue-600')}>
-                      {finalTotal.toFixed(2)} <span className="text-sm font-bold text-slate-400">DH</span>
+                      {hideAchatAmounts ? '—' : finalTotal.toFixed(2)} <span className="text-sm font-bold text-slate-400">DH</span>
                     </p>
-                    {monnaieARendre > 0.005 && (
+                    {hideAchatAmounts && (
+                      <p className="text-[10px] font-bold text-slate-400 mt-0.5">🔒 Montants confidentiels — fixés à la validation admin</p>
+                    )}
+                    {!hideAchatAmounts && monnaieARendre > 0.005 && (
                       <p className="text-xs font-bold text-blue-500 mt-0.5">💴 Monnaie à rendre : {monnaieARendre.toFixed(2)} DH</p>
                     )}
-                    {resteAPayer > 0.01 && (
+                    {!hideAchatAmounts && resteAPayer > 0.01 && (
                       <p className="text-xs font-bold text-rose-500 mt-0.5">
                         {montantSaisi ? `Payé : ${Math.min(montantPayeNum, finalTotal).toFixed(2)} DH · ` : ''}Reste : {resteAPayer.toFixed(2)} DH
                       </p>

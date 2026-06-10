@@ -18,6 +18,7 @@ import {
   BarChart2,
   DollarSign,
   Tag,
+  Lock,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import OperationDetailsModal from '../components/OperationDetailsModal';
@@ -147,6 +148,14 @@ function isValidatedStatus(status: Operation['status']): boolean {
 type SortKey = 'num_op' | 'date' | 'type' | 'agentName' | 'finalTotal' | 'status';
 
 export default function History({ profile }: HistoryProps) {
+  const isAdmin = profile?.roleId === 'admin';
+  const isCashier = profile?.roleId === 'cashier';
+
+  // Confidentialité prix d'achat : un caissier ne voit aucun montant
+  // sur les opérations achat / retour fournisseur (montants = prix d'achat)
+  const isConfidentialOp = (type: string) =>
+    isCashier && (type === 'achat' || type === 'retour_fournisseur');
+
   const [operations, setOperations] = useState<HistoryOperation[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -390,23 +399,26 @@ export default function History({ profile }: HistoryProps) {
         (prods || []).forEach((p: any) => { prodMap[p.code] = p.produit; });
       }
 
-      setPriceHistory((data || []).map((row: any) => ({
-        id: row.id,
-        produitCode: row.produit_code,
-        produitNom: prodMap[row.produit_code] || row.produit_code || '—',
-        typePrix: row.type_prix || 'vente',
-        ancienPrix: parseFloat(row.ancien_prix || 0),
-        nouveauPrix: parseFloat(row.nouveau_prix || 0),
-        agentName: row.utilisateur_id ? (agentMap[row.utilisateur_id] || '—') : '—',
-        dateModif: row.date_modif || '',
-        heureModif: row.heure_modif || '',
-      })));
+      setPriceHistory((data || [])
+        // Confidentialité : seul l'admin voit l'historique des prix d'ACHAT
+        .filter((row: any) => isAdmin || (row.type_prix || 'vente') !== 'achat')
+        .map((row: any) => ({
+          id: row.id,
+          produitCode: row.produit_code,
+          produitNom: prodMap[row.produit_code] || row.produit_code || '—',
+          typePrix: row.type_prix || 'vente',
+          ancienPrix: parseFloat(row.ancien_prix || 0),
+          nouveauPrix: parseFloat(row.nouveau_prix || 0),
+          agentName: row.utilisateur_id ? (agentMap[row.utilisateur_id] || '—') : '—',
+          dateModif: row.date_modif || '',
+          heureModif: row.heure_modif || '',
+        })));
     } catch (err) {
       console.error('[History] fetchPriceHistory:', err);
     } finally {
       setLoadingPrix(false);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     if (!profile?.id || activeTab !== 'prix') return;
@@ -414,25 +426,28 @@ export default function History({ profile }: HistoryProps) {
   }, [profile?.id, activeTab, fetchPriceHistory]);
 
   const handleExportXLSX = () => {
-    const rows = filtered.map((op) => ({
-      Date: op.createdAt?.toDate?.()?.toLocaleDateString('fr-FR') ?? 'N/A',
-      Heure:
-        op.createdAt?.toDate?.()?.toLocaleTimeString('fr-FR', {
-          hour: '2-digit',
-          minute: '2-digit',
-        }) ?? '',
-      Numéro: op.operationNumber,
-      Type: op.type === 'retour_client' ? 'Avoir / Retour' : op.type === 'retour_fournisseur' ? 'Retour Fournisseur' : op.type,
-      Articles: op.items.length > 0
-        ? op.items.map(i => `${i.productName || i.productId} (x${i.quantity})`).join(', ')
-        : op.productSummary,
-      'Qté totale': op.itemsQuantity,
-      'Montant HT (DH)': op.grossTotal.toFixed(2),
-      'Remise (DH)': (op.discountAmount ?? 0).toFixed(2),
-      'Total Final (DH)': op.finalTotal.toFixed(2),
-      Statut: op.status,
-      Observation: op.observation ?? '',
-    }));
+    const rows = filtered.map((op) => {
+      const confidential = isConfidentialOp(op.type);
+      return {
+        Date: op.createdAt?.toDate?.()?.toLocaleDateString('fr-FR') ?? 'N/A',
+        Heure:
+          op.createdAt?.toDate?.()?.toLocaleTimeString('fr-FR', {
+            hour: '2-digit',
+            minute: '2-digit',
+          }) ?? '',
+        Numéro: op.operationNumber,
+        Type: op.type === 'retour_client' ? 'Avoir / Retour' : op.type === 'retour_fournisseur' ? 'Retour Fournisseur' : op.type,
+        Articles: op.items.length > 0
+          ? op.items.map(i => `${i.productName || i.productId} (x${i.quantity})`).join(', ')
+          : op.productSummary,
+        'Qté totale': op.itemsQuantity,
+        'Montant HT (DH)': confidential ? 'Confidentiel' : op.grossTotal.toFixed(2),
+        'Remise (DH)': confidential ? 'Confidentiel' : (op.discountAmount ?? 0).toFixed(2),
+        'Total Final (DH)': confidential ? 'Confidentiel' : op.finalTotal.toFixed(2),
+        Statut: op.status,
+        Observation: op.observation ?? '',
+      };
+    });
 
     const ws = XLSX.utils.json_to_sheet(rows);
     ws['!cols'] = [
@@ -886,18 +901,27 @@ export default function History({ profile }: HistoryProps) {
                               <p className="text-[10px] text-slate-400 font-medium">{op.clientName || op.fournisseurName}</p>
                             )}
                           </td>
-                          {/* Total */}
+                          {/* Total — masqué pour caissier sur achat/retour fournisseur (confidentialité) */}
                           <td className="px-4 py-3">
-                            <p className={cn('font-black text-sm',
-                              op.type === 'retour_client' ? 'text-rose-600' : 'text-slate-900'
-                            )}>
-                              {op.type === 'retour_client' ? '−' : ''}{op.finalTotal.toFixed(2)}
-                              <span className="text-[10px] text-slate-400 ml-0.5">DH</span>
-                            </p>
+                            {isConfidentialOp(op.type) ? (
+                              <span className="inline-flex items-center gap-1 text-slate-300" title="Montant confidentiel">
+                                <Lock className="h-3 w-3" />
+                                <span className="text-xs font-black">•••</span>
+                              </span>
+                            ) : (
+                              <p className={cn('font-black text-sm',
+                                op.type === 'retour_client' ? 'text-rose-600' : 'text-slate-900'
+                              )}>
+                                {op.type === 'retour_client' ? '−' : ''}{op.finalTotal.toFixed(2)}
+                                <span className="text-[10px] text-slate-400 ml-0.5">DH</span>
+                              </p>
+                            )}
                           </td>
                           {/* Paiement — innovation: stacked montant_paye + dette badge */}
                           <td className="px-4 py-3">
-                            {op.montantPaye != null ? (
+                            {isConfidentialOp(op.type) ? (
+                              <span className="text-[10px] text-slate-300">—</span>
+                            ) : op.montantPaye != null ? (
                               <div className="space-y-0.5">
                                 <p className="text-xs font-bold text-slate-700">
                                   {op.montantPaye.toFixed(2)} <span className="text-[9px] text-slate-400">DH</span>
@@ -949,12 +973,12 @@ export default function History({ profile }: HistoryProps) {
                               </button>
                               <button
                                 onClick={() => handlePrintTicket(op)}
-                                disabled={printingId === op.id || op.status === 'en_attente'}
+                                disabled={printingId === op.id || op.status === 'en_attente' || isConfidentialOp(op.type)}
                                 className={cn('p-1.5 rounded-lg transition-all disabled:opacity-40',
-                                  op.status === 'en_attente' ? 'text-slate-300 cursor-not-allowed'
+                                  (op.status === 'en_attente' || isConfidentialOp(op.type)) ? 'text-slate-300 cursor-not-allowed'
                                   : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'
                                 )}
-                                title={op.status === 'en_attente' ? 'Ticket indisponible' : 'Imprimer ticket PDF'}
+                                title={isConfidentialOp(op.type) ? 'Ticket confidentiel (prix d\'achat)' : op.status === 'en_attente' ? 'Ticket indisponible' : 'Imprimer ticket PDF'}
                               >
                                 {printingId === op.id
                                   ? <div className="h-4 w-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
