@@ -57,7 +57,7 @@ export async function pullMasterData(): Promise<{ success: boolean; error?: stri
     // ── Clients ───────────────────────────────────────────────────────────────
     const { data: clientsRaw, error: cliErr } = await supabase
       .from('clients')
-      .select('id_client, nom_prenom, num_telephone, fonction');
+      .select('id_client, nom_prenom, num_telephone, fonction, actif');
 
     if (cliErr) throw new Error(`clients: ${cliErr.message}`);
 
@@ -66,6 +66,7 @@ export async function pullMasterData(): Promise<{ success: boolean; error?: stri
       nom_prenom:    c.nom_prenom,
       num_telephone: c.num_telephone ?? null,
       fonction:      c.fonction ?? null,
+      actif:         c.actif !== false,
     }));
 
     await db.clients.bulkPut(clients);
@@ -139,24 +140,69 @@ export async function pushPendingOperations(): Promise<{
           items: Record<string, unknown>[];
         };
 
-        // Insert operation header
-        const { data: newOp, error: opErr } = await supabase
-          .from('operations')
-          .insert(header)
-          .select()
-          .single();
+        // ── Idempotence : si un retry précédent a déjà inséré ce header,
+        //    on le retrouve via son id_op (UUID généré côté client à l'enqueue)
+        //    au lieu de créer un doublon.
+        let parentId: number | null = null;
+        if (header.id_op) {
+          const { data: existing, error: findErr } = await supabase
+            .from('operations')
+            .select('num_op')
+            .eq('id_op', header.id_op as string)
+            .maybeSingle();
+          if (findErr) throw new Error(findErr.message);
+          if (existing) parentId = (existing as any).num_op;
+        }
 
-        if (opErr) throw new Error(opErr.message);
+        if (parentId == null) {
+          const { data: newOp, error: opErr } = await supabase
+            .from('operations')
+            .insert(header)
+            .select()
+            .single();
+          if (opErr) throw new Error(opErr.message);
+          parentId = (newOp as any).num_op;
+        }
 
-        const parentId: number = (newOp as any).num_op;
-
-        // Insert operation items with resolved operation_id
+        // Insert operation items with resolved operation_id (skip si déjà présents — retry-safe)
         if (items.length > 0) {
-          const itemRows = items.map((i) => ({ ...i, operation_id: parentId }));
-          const { error: itemsErr } = await supabase
+          const { count: existingItems, error: cntErr } = await supabase
             .from('operation_items')
-            .insert(itemRows);
-          if (itemsErr) throw new Error(itemsErr.message);
+            .select('id', { count: 'exact', head: true })
+            .eq('operation_id', parentId);
+          if (cntErr) throw new Error(cntErr.message);
+
+          if (!existingItems) {
+            const itemRows = items.map((i) => ({ ...i, operation_id: parentId }));
+            const { error: itemsErr } = await supabase
+              .from('operation_items')
+              .insert(itemRows);
+            if (itemsErr) throw new Error(itemsErr.message);
+          }
+        }
+
+        // ── STOCK CENTRAL : applique les deltas des opérations hors-ligne.
+        //    Ventes validées → stock −qté ; retours client → stock +qté.
+        //    Achats : AUCUN delta ici (stock appliqué à la validation admin).
+        //    RPC atomique (UPDATE unique) + flag stockApplied = pas de double application.
+        if (!item.stockApplied) {
+          const typeOp = String(header.type_op || '');
+          const isQueuedVente = typeOp === 'vente' && header.statut === 'valide';
+          const isQueuedRetour = typeOp === 'retour_client';
+
+          if (isQueuedVente || isQueuedRetour) {
+            for (const it of items) {
+              const qty = parseFloat(String(it.quantite ?? 0));
+              if (!qty) continue;
+              const { error: rpcErr } = await supabase.rpc('apply_stock_delta', {
+                p_code: String(it.produit_id),
+                p_delta_stock: isQueuedVente ? -qty : qty,
+                p_delta_qte_vente: isQueuedVente ? qty : -qty,
+              });
+              if (rpcErr) throw new Error(`stock ${it.produit_id}: ${rpcErr.message}`);
+            }
+          }
+          await db.sync_queue.update(item.id!, { stockApplied: true });
         }
       } else {
         console.warn(`[Sync] unknown queue item type: ${item.type} — skipping`);
@@ -202,7 +248,9 @@ export async function commitOperation(
 ): Promise<{ numOp: number | string; queued: boolean }> {
 
   if (!isOnline()) {
-    await enqueueOperation('operation', header, items);
+    // id_op généré côté client = clé d'idempotence du push (retry sans doublon)
+    const headerWithId = { id_op: crypto.randomUUID(), ...header };
+    await enqueueOperation('operation', headerWithId, items);
     const localId = `LOC-${Date.now().toString().slice(-6)}`;
     console.info(`[Sync] commitOperation — offline, enqueued as ${localId}`);
     return { numOp: localId, queued: true };

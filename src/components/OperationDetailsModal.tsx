@@ -36,6 +36,10 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
   const [returnItems, setReturnItems] = useState<ReturnItem[]>([]);
   const [creatingReturn, setCreatingReturn] = useState(false);
 
+  // ── Paiement fournisseur à la validation d'un achat (comptes fournisseurs) ──
+  const [supplierPaid, setSupplierPaid] = useState('');
+  const [supplierEcheance, setSupplierEcheance] = useState('');
+
   const isAdmin = profile?.roleId === 'admin';
   const isCashier = profile?.roleId === 'cashier';
 
@@ -127,6 +131,21 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
           }]);
         } else {
           setItems([]);
+        }
+      }
+
+      // Préremplissage du paiement fournisseur (achat en attente) depuis l'en-tête
+      const pending = (operation as any).statut === 'en_attente' || operation.status === 'en_attente';
+      if (pending) {
+        const { data: opRow } = await supabase
+          .from('operations')
+          .select('montant_paye, date_echeance')
+          .eq('num_op', parseInt(operation.id))
+          .single();
+        if (opRow) {
+          const mp = parseFloat(opRow.montant_paye || 0);
+          setSupplierPaid(mp > 0.01 ? String(mp) : '');
+          setSupplierEcheance(opRow.date_echeance || '');
         }
       }
     } catch (err) {
@@ -233,13 +252,37 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
   }, [operation.isModified, fetchVersionHistory]);
 
   // ── Validation Achat Admin ────────────────────────────────────────────────
+  const supplierPaidNum = parseFloat(supplierPaid || '0') || 0;
+  const supplierReste = Math.max(0, finalTotal - supplierPaidNum);
+
   const handleValidatePurchase = async () => {
     if (!isAdmin || !isPendingPurchase) return;
+
+    // Règles comptes fournisseurs : montant payé ≤ total ; échéance obligatoire si solde restant
+    if (supplierPaidNum < 0 || supplierPaidNum > finalTotal + 0.01) {
+      alert(`Le montant payé (${supplierPaidNum.toFixed(2)} DH) doit être compris entre 0 et le total de l'achat (${finalTotal.toFixed(2)} DH).`);
+      return;
+    }
+    if (supplierReste > 0.01 && !supplierEcheance) {
+      alert(`Un solde de ${supplierReste.toFixed(2)} DH reste dû au fournisseur.\nLa date d'échéance est obligatoire pour les paiements partiels.`);
+      return;
+    }
+
     setValidating(true);
     try {
       const { error: statusErr } = await supabase
         .from('operations')
-        .update({ statut: 'valide', observ: 'Achat validé par admin', total_dh: finalTotal })
+        .update({
+          statut: 'valide',
+          observ: 'Achat validé par admin',
+          total_dh: finalTotal,
+          // Le paiement réellement effectué au fournisseur — corrige la colonne
+          // "Paiement" de l'historique qui affichait l'ancien montant pré-validation
+          montant_paye: supplierPaidNum,
+          reste_a_payer: supplierReste,
+          statut_paiement: supplierReste <= 0.01 ? 'Payé' : (supplierPaidNum > 0.01 ? 'Partiel' : 'Crédit'),
+          date_echeance: supplierReste > 0.01 ? supplierEcheance : null,
+        })
         .eq('num_op', parseInt(operation.id));
       if (statusErr) throw statusErr;
 
@@ -254,24 +297,15 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
       for (const item of items) {
         const product = products.find((p) => p.id === item.productId);
         if (!product) continue;
-        try {
-          const { data: dbProd, error: fetchErr } = await supabase
-            .from('produits')
-            .select('stock_actuel, qte_achat, prix_vente')
-            .eq('code', product.code)
-            .single();
-          if (fetchErr) throw fetchErr;
-          const currentStock = dbProd ? parseFloat(dbProd.stock_actuel || 0) : product.stockActual;
-          const currentQteAchat = dbProd ? parseFloat(dbProd.qte_achat || 0) : 0;
-          const price = dbProd ? parseFloat(dbProd.prix_vente || 0) : product.defaultPrice;
-          const newStock = currentStock + item.quantity;
-          const { error: updateErr } = await supabase
-            .from('produits')
-            .update({ stock_actuel: newStock, qte_achat: currentQteAchat + item.quantity, pdat: item.unitPrice, valeur_stock: newStock * price })
-            .eq('code', product.code);
-          if (updateErr) throw updateErr;
-        } catch (stockErr) {
-          const msg = `${product.code}: ${stockErr instanceof Error ? stockErr.message : String(stockErr)}`;
+        // RPC atomique : entrée en stock + cumul qte_achat + pdat réel — sans course
+        const { error: rpcErr } = await supabase.rpc('apply_stock_delta', {
+          p_code: product.code,
+          p_delta_stock: item.quantity,
+          p_delta_qte_achat: item.quantity,
+          p_new_pdat: item.unitPrice,
+        });
+        if (rpcErr) {
+          const msg = `${product.code}: ${rpcErr.message}`;
           console.error('[handleValidatePurchase] stock update failed —', msg);
           stockErrors.push(msg);
         }
@@ -509,13 +543,61 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
           </div>
         )}
 
-        {/* ── Alerte achat en attente ── */}
+        {/* ── Alerte achat en attente + paiement fournisseur ── */}
         {isPendingPurchase && isAdmin && (
-          <div className="mx-6 mt-4 p-4 bg-orange-50 border border-orange-200 rounded-2xl flex items-center gap-3">
-            <ShieldCheck className="h-5 w-5 text-orange-500 shrink-0" />
-            <div>
-              <p className="text-sm font-black text-orange-800">Achat en attente de validation</p>
-              <p className="text-xs text-orange-600">Vérifiez et ajustez les prix si nécessaire, puis validez pour mettre à jour le stock.</p>
+          <div className="mx-6 mt-4 bg-orange-50 border border-orange-200 rounded-2xl overflow-hidden">
+            <div className="p-4 flex items-center gap-3">
+              <ShieldCheck className="h-5 w-5 text-orange-500 shrink-0" />
+              <div>
+                <p className="text-sm font-black text-orange-800">Achat en attente de validation</p>
+                <p className="text-xs text-orange-600">Vérifiez les prix, renseignez le paiement fournisseur, puis validez pour mettre à jour le stock.</p>
+              </div>
+            </div>
+            <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <label className="text-[10px] font-black text-orange-700 uppercase tracking-widest">Montant payé au fournisseur (DH)</label>
+                <div className="flex gap-1.5">
+                  <input
+                    type="number" step="0.01" min="0"
+                    className="w-full bg-white border border-orange-200 rounded-xl py-2 px-3 text-sm font-black text-slate-800 focus:ring-2 focus:ring-orange-400/30"
+                    placeholder="0.00"
+                    value={supplierPaid}
+                    onChange={(e) => setSupplierPaid(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setSupplierPaid(finalTotal.toFixed(2))}
+                    className="shrink-0 px-2.5 py-1 text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl hover:bg-emerald-100 transition-all"
+                    title="Achat intégralement payé"
+                  >
+                    TOUT
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] font-black text-orange-700 uppercase tracking-widest">
+                  Date échéance {supplierReste > 0.01 && <span className="text-rose-600">*obligatoire</span>}
+                </label>
+                <input
+                  type="date"
+                  className={cn(
+                    'w-full bg-white border rounded-xl py-2 px-3 text-sm font-bold text-slate-800 focus:ring-2 focus:ring-orange-400/30',
+                    supplierReste > 0.01 && !supplierEcheance ? 'border-rose-400' : 'border-orange-200'
+                  )}
+                  value={supplierEcheance}
+                  onChange={(e) => setSupplierEcheance(e.target.value)}
+                  disabled={supplierReste <= 0.01}
+                />
+              </div>
+              <div className="space-y-1">
+                <p className="text-[10px] font-black text-orange-700 uppercase tracking-widest">Reste dû au fournisseur</p>
+                <p className={cn(
+                  'py-2 px-3 rounded-xl text-sm font-black border',
+                  supplierReste > 0.01 ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                )}>
+                  {supplierReste > 0.01 ? `${supplierReste.toFixed(2)} DH` : 'Soldé ✓'}
+                </p>
+              </div>
             </div>
           </div>
         )}

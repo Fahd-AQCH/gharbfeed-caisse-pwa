@@ -23,6 +23,7 @@ import {
   Edit2,
   ArrowUpDown,
   Crown,
+  Building2,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -38,8 +39,9 @@ interface DebtOp {
   dateOp: string;
   heureOp?: string;
   typeOp: string;
+  kind: 'client' | 'fournisseur';   // créance client ou crédit fournisseur (compte à payer)
   clientId?: number;
-  clientName?: string;
+  clientName?: string;              // nom de la contrepartie (client OU fournisseur)
   clientPhone?: string;
   totalDh: number;
   montantPaye: number;
@@ -51,7 +53,7 @@ interface DebtOp {
   daysOverdue: number;
 }
 
-type TabId = 'dashboard' | 'actives' | 'historique';
+type TabId = 'dashboard' | 'actives' | 'fournisseurs' | 'historique';
 type SortKey = 'echeance' | 'montant' | 'client' | 'date';
 
 export default function Debts({ profile }: DebtsProps) {
@@ -74,6 +76,13 @@ export default function Debts({ profile }: DebtsProps) {
   // Édition inline de l'échéance (admin / trésorier)
   const [editingEcheanceId, setEditingEcheanceId] = useState<number | null>(null);
   const [echeanceDraft, setEcheanceDraft] = useState('');
+
+  // ── Crédits fournisseurs (comptes à payer) — admin / trésorier uniquement ──
+  const [supplierOps, setSupplierOps] = useState<DebtOp[]>([]);
+  const [supplierLoading, setSupplierLoading] = useState(false);
+  const [supplierLoaded, setSupplierLoaded] = useState(false);
+  const [supplierSearch, setSupplierSearch] = useState('');
+  const [supplierExpandedId, setSupplierExpandedId] = useState<number | null>(null);
 
   // ── Debt history (tab 3) ────────────────────────────────────────────────────
   const [debtHistory, setDebtHistory] = useState<DebtOp[]>([]);
@@ -121,6 +130,7 @@ export default function Debts({ profile }: DebtsProps) {
         dateOp: op.date_op || '',
         heureOp: op.heure_op || '',
         typeOp: op.type_op || 'vente',
+        kind: 'client' as const,
         clientId: op.client_id ?? undefined,
         clientName: op.client_id ? (clientMap[String(op.client_id)] || `#${op.client_id}`) : 'Comptoir',
         clientPhone: op.client_id ? phoneMap[String(op.client_id)] : undefined,
@@ -142,6 +152,7 @@ export default function Debts({ profile }: DebtsProps) {
       const { data: opsData, error } = await supabase
         .from('operations')
         .select('*')
+        .eq('type_op', 'vente') // créances CLIENTS uniquement — les achats vivent dans Crédits Fournisseurs
         .gt('reste_a_payer', 0.01)
         .eq('statut', 'valide')
         .order('date_echeance', { ascending: true, nullsFirst: false })
@@ -153,6 +164,71 @@ export default function Debts({ profile }: DebtsProps) {
       console.error('[Debts] fetchDebts:', err);
     } finally {
       setLoading(false);
+    }
+  }, [todayStr]);
+
+  // ── Crédits fournisseurs : achats validés avec solde restant dû ────────────
+  const enrichSupplierOps = async (opsData: any[]): Promise<DebtOp[]> => {
+    if (!opsData?.length) return [];
+    const fIds = [...new Set(opsData.map((op: any) => op.fournisseur_id).filter(Boolean))];
+    const fournMap: Record<string, { nom: string; tel?: string }> = {};
+    if (fIds.length > 0) {
+      const { data: fourns } = await supabase
+        .from('fournisseurs')
+        .select('id_fournisseur, nom, num_telephone')
+        .in('id_fournisseur', fIds);
+      (fourns || []).forEach((f: any) => {
+        fournMap[String(f.id_fournisseur)] = { nom: f.nom, tel: f.num_telephone || undefined };
+      });
+    }
+    return opsData.map((op: any) => {
+      const echeance = op.date_echeance || null;
+      const isOverdue = !!echeance && echeance < todayStr;
+      const daysOverdue = isOverdue
+        ? Math.floor((new Date(todayStr).getTime() - new Date(echeance).getTime()) / 86400000)
+        : 0;
+      const f = op.fournisseur_id ? fournMap[String(op.fournisseur_id)] : undefined;
+      return {
+        numOp: op.num_op,
+        operationNumber: `OP-${String(op.num_op).padStart(4, '0')}`,
+        dateOp: op.date_op || '',
+        heureOp: op.heure_op || '',
+        typeOp: op.type_op || 'achat',
+        kind: 'fournisseur' as const,
+        clientId: undefined,
+        clientName: f?.nom || (op.fournisseur_id ? `Fournisseur #${op.fournisseur_id}` : 'Fournisseur inconnu'),
+        clientPhone: f?.tel,
+        totalDh: parseFloat(op.total_dh || 0),
+        montantPaye: parseFloat(op.montant_paye || 0),
+        resteAPayer: parseFloat(op.reste_a_payer || 0),
+        dateEcheance: echeance,
+        statutPaiement: op.statut_paiement,
+        conditionPaiement: op.condition_paiement || 'Espèce',
+        isOverdue,
+        daysOverdue,
+      };
+    });
+  };
+
+  const fetchSupplierCredits = useCallback(async () => {
+    setSupplierLoading(true);
+    try {
+      const { data: opsData, error } = await supabase
+        .from('operations')
+        .select('*')
+        .eq('type_op', 'achat')
+        .eq('statut', 'valide')
+        .gt('reste_a_payer', 0.01)
+        .order('date_echeance', { ascending: true, nullsFirst: false })
+        .order('num_op', { ascending: false })
+        .limit(500);
+      if (error) throw error;
+      setSupplierOps(await enrichSupplierOps(opsData || []));
+      setSupplierLoaded(true);
+    } catch (err) {
+      console.error('[Debts] fetchSupplierCredits:', err);
+    } finally {
+      setSupplierLoading(false);
     }
   }, [todayStr]);
 
@@ -183,6 +259,10 @@ export default function Debts({ profile }: DebtsProps) {
   useEffect(() => {
     if (activeTab === 'historique') fetchDebtHistory();
   }, [activeTab, fetchDebtHistory]);
+
+  useEffect(() => {
+    if (activeTab === 'fournisseurs' && canManage && !supplierLoaded) fetchSupplierCredits();
+  }, [activeTab, canManage, supplierLoaded, fetchSupplierCredits]);
 
   const fetchPaymentHistory = async (opId: number) => {
     if (paymentHistories[opId]) return;
@@ -286,6 +366,7 @@ export default function Debts({ profile }: DebtsProps) {
         generateDebtPaymentPDF({
           operationNumber: activeDebt.operationNumber,
           clientName: activeDebt.clientName || 'Comptoir',
+          counterpartyLabel: activeDebt.kind === 'fournisseur' ? 'Fournisseur' : 'Client',
           totalOriginal: activeDebt.totalDh,
           montantCePaiement: amount,
           totalDejaPaye: activeDebt.montantPaye,
@@ -301,6 +382,7 @@ export default function Debts({ profile }: DebtsProps) {
 
       setPaymentHistories(prev => { const n = { ...prev }; delete n[activeDebt.numOp]; return n; });
       setHistoryLoaded(false); // invalidate history cache
+      setSupplierLoaded(false); // invalidate supplier credits cache
       setShowPaymentModal(false);
       fetchDebts();
       if (isSolde) alert(`✅ La créance ${activeDebt.operationNumber} est intégralement soldée !`);
@@ -336,7 +418,8 @@ export default function Debts({ profile }: DebtsProps) {
       if (error) throw error;
       setEditingEcheanceId(null);
       setEcheanceDraft('');
-      fetchDebts();
+      if (debt.kind === 'fournisseur') fetchSupplierCredits();
+      else fetchDebts();
     } catch (err) {
       alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     }
@@ -415,6 +498,7 @@ export default function Debts({ profile }: DebtsProps) {
     onToggle: (id: number) => void;
     manageable?: boolean;
   }> = ({ debt, onPay, expandedId, onToggle, manageable = false }) => {
+    const isSupplier = debt.kind === 'fournisseur';
     // Paiement initial (acompte à la création) = montant payé cumulé − somme des paiements partiels enregistrés.
     // Chaque paiement de debt_payments incrémente operations.montant_paye, donc la différence
     // reconstitue exactement le montant_paye initial de l'opération.
@@ -427,6 +511,7 @@ export default function Debts({ profile }: DebtsProps) {
       generateDebtPaymentPDF({
         operationNumber: debt.operationNumber,
         clientName: debt.clientName || 'Comptoir',
+        counterpartyLabel: isSupplier ? 'Fournisseur' : 'Client',
         totalOriginal: debt.totalDh,
         montantCePaiement: initialPayment,
         totalDejaPaye: 0,
@@ -513,7 +598,7 @@ export default function Debts({ profile }: DebtsProps) {
           <p className="text-[10px] text-slate-400 font-medium">Payé : {debt.montantPaye.toFixed(2)} / {debt.totalDh.toFixed(2)} DH</p>
         </div>
         <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-          {manageable && debt.resteAPayer > 0.01 && (() => {
+          {manageable && !isSupplier && debt.resteAPayer > 0.01 && (() => {
             const wa = buildWhatsAppLink(debt);
             return wa ? (
               <a
@@ -609,7 +694,7 @@ export default function Debts({ profile }: DebtsProps) {
                             // (realPayments est trié par created_at puis id → slice(0, idx) = chronologie exacte)
                             const prevPaid = initialPayment + realPayments.slice(0, idx).reduce((s, px) => s + px.montant, 0);
                             const afterBalance = Math.max(0, debt.totalDh - prevPaid - p.montant);
-                            generateDebtPaymentPDF({ operationNumber: debt.operationNumber, clientName: debt.clientName || 'Comptoir', totalOriginal: debt.totalDh, montantCePaiement: p.montant, totalDejaPaye: prevPaid, resteAPayerApres: afterBalance, datePaiement: p.datePaiement, heurePaiement: p.heurePaiement, conditionPaiement: p.conditionPaiement, refPaiement: p.refPaiement, cashierName: p.agentName, notes: p.notes });
+                            generateDebtPaymentPDF({ operationNumber: debt.operationNumber, clientName: debt.clientName || 'Comptoir', counterpartyLabel: isSupplier ? 'Fournisseur' : 'Client', totalOriginal: debt.totalDh, montantCePaiement: p.montant, totalDejaPaye: prevPaid, resteAPayerApres: afterBalance, datePaiement: p.datePaiement, heurePaiement: p.heurePaiement, conditionPaiement: p.conditionPaiement, refPaiement: p.refPaiement, cashierName: p.agentName, notes: p.notes });
                           }}
                           className="p-1.5 text-slate-300 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
                           title="Réimprimer le reçu"
@@ -649,6 +734,8 @@ export default function Debts({ profile }: DebtsProps) {
           {([
             { id: 'dashboard', label: 'Vue d\'ensemble', icon: LayoutDashboard },
             { id: 'actives', label: 'Créances actives', icon: List },
+            // Crédits fournisseurs = montants d'achat → rôles financiers uniquement
+            ...(canManage ? [{ id: 'fournisseurs' as TabId, label: 'Crédits Fournisseurs', icon: Building2 }] : []),
             { id: 'historique', label: 'Historique', icon: History },
           ] as { id: TabId; label: string; icon: React.ElementType }[]).map((tab) => (
             <button
@@ -904,6 +991,101 @@ export default function Debts({ profile }: DebtsProps) {
                 ))}
               </div>
             )}
+          </>
+        )}
+
+        {/* ── TAB: Crédits Fournisseurs (comptes à payer) ── */}
+        {activeTab === 'fournisseurs' && canManage && (
+          <>
+            {/* KPIs fournisseurs */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total dû aux fournisseurs</span>
+                  <div className="h-8 w-8 bg-blue-50 rounded-xl flex items-center justify-center"><Building2 className="h-4 w-4 text-blue-500" /></div>
+                </div>
+                <p className="text-2xl font-black text-blue-700">
+                  {supplierOps.reduce((s, d) => s + d.resteAPayer, 0).toFixed(0)}
+                  <span className="text-sm font-bold text-slate-400 ml-1">DH</span>
+                </p>
+                <p className="text-xs text-slate-400 font-medium mt-1">Comptes à payer (achats)</p>
+              </div>
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Crédits actifs</span>
+                  <div className="h-8 w-8 bg-amber-50 rounded-xl flex items-center justify-center"><TrendingDown className="h-4 w-4 text-amber-500" /></div>
+                </div>
+                <p className="text-2xl font-black text-slate-900">{supplierOps.length}</p>
+                <p className="text-xs text-slate-400 font-medium mt-1">Achats non soldés</p>
+              </div>
+              {(() => {
+                const overdue = supplierOps.filter((d) => d.isOverdue);
+                const totalOverdue = overdue.reduce((s, d) => s + d.resteAPayer, 0);
+                return (
+                  <div className={cn('rounded-2xl border p-5 shadow-sm', overdue.length > 0 ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200')}>
+                    <div className="flex items-center justify-between mb-3">
+                      <span className={cn('text-[10px] font-black uppercase tracking-widest', overdue.length > 0 ? 'text-rose-500' : 'text-slate-400')}>Échéances dépassées</span>
+                      <div className={cn('h-8 w-8 rounded-xl flex items-center justify-center', overdue.length > 0 ? 'bg-rose-100' : 'bg-slate-50')}>
+                        <AlertTriangle className={cn('h-4 w-4', overdue.length > 0 ? 'text-rose-600' : 'text-slate-400')} />
+                      </div>
+                    </div>
+                    <p className={cn('text-2xl font-black', overdue.length > 0 ? 'text-rose-700' : 'text-slate-900')}>{overdue.length}</p>
+                    <p className={cn('text-xs font-medium mt-1', overdue.length > 0 ? 'text-rose-600' : 'text-slate-400')}>
+                      {overdue.length > 0 ? `${totalOverdue.toFixed(0)} DH à régler d'urgence` : 'Aucun retard de paiement'}
+                    </p>
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Filtrer par fournisseur ou numéro d'opération..."
+                className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 transition-all"
+                value={supplierSearch}
+                onChange={(e) => setSupplierSearch(e.target.value)}
+              />
+            </div>
+
+            {supplierLoading ? (
+              <div className="flex items-center justify-center py-20">
+                <div className="h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : (() => {
+              const filteredSuppliers = supplierOps.filter((d) => {
+                if (!supplierSearch.trim()) return true;
+                const q = supplierSearch.toLowerCase();
+                return (d.clientName || '').toLowerCase().includes(q) || d.operationNumber.toLowerCase().includes(q);
+              });
+              return filteredSuppliers.length === 0 ? (
+                <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center">
+                  <div className="h-16 w-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <CheckCircle2 className="h-8 w-8 text-emerald-500" />
+                  </div>
+                  <p className="text-xl font-black text-slate-900">{supplierSearch ? 'Aucun résultat' : 'Aucun crédit fournisseur !'}</p>
+                  <p className="text-sm text-slate-400 font-medium mt-1">{supplierSearch ? 'Modifiez votre recherche.' : 'Tous les achats sont intégralement réglés.'}</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {filteredSuppliers.map((debt) => (
+                    <DebtRow
+                      key={debt.numOp}
+                      debt={debt}
+                      onPay={openPaymentModal}
+                      expandedId={supplierExpandedId}
+                      onToggle={(id) => {
+                        if (supplierExpandedId === id) { setSupplierExpandedId(null); return; }
+                        setSupplierExpandedId(id);
+                        fetchPaymentHistory(id);
+                      }}
+                      manageable={canManage}
+                    />
+                  ))}
+                </div>
+              );
+            })()}
           </>
         )}
 

@@ -160,7 +160,7 @@ export default function App() {
                 return;
               }
               const rawRole = userData.role_id || userData.role || 'caissier';
-              const roleId = rawRole === 'admin' ? 'admin' : 'cashier';
+              const roleId = rawRole === 'admin' ? 'admin' : rawRole === 'tresorier' ? 'tresorier' : 'cashier';
               const isActive = userData.is_active !== undefined ? userData.is_active : userData.actif !== undefined ? userData.actif : true;
               setProfile({
                 id: userData.id,

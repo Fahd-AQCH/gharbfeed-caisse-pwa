@@ -61,7 +61,7 @@ export function generateRetourPDF(operation: RetourOperation, items: RetourItem[
   doc.setFontSize(7);
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(...COLORS.slate400);
-  doc.text('Alimentation Animale · Gestion de Stock', margin + 22, y + 14.5);
+  doc.text("Alimentation animale et Matériel d'élevage", margin + 22, y + 14.5);
 
   // Badge type retour
   const badgeLabel = isRetourClient ? '  AVOIR  ' : '  RET. FOURN.  ';

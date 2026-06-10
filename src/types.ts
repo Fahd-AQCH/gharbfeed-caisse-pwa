@@ -34,6 +34,7 @@ export interface Client {
   address?: string;
   function?: string;
   phone?: string;
+  actif?: boolean;       // soft delete — false = client désactivé
   createdAt: any;
   updatedAt: any;
 }

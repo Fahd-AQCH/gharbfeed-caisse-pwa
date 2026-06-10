@@ -13,7 +13,10 @@ import {
   MapPin,
   Eye,
   AlertTriangle,
-  Clock,
+  Lock,
+  ShoppingBag,
+  TrendingUp,
+  CreditCard,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -31,9 +34,26 @@ interface Fournisseur {
   irc?: string | null;
   ice?: string | null;
   cin?: string | null;
-  date_echeance_paiement?: string | null;
   notes?: string | null;
   _totalAchats?: number;
+  _soldeDu?: number;
+}
+
+interface FournisseurAccount {
+  fournisseurId: number;
+  nom: string;
+  totalAchats: number;
+  totalPaye: number;
+  soldeDu: number;
+  nbOperations: number;
+  recentOps: Array<{
+    numOp: number;
+    dateOp: string;
+    totalDh: number;
+    resteAPayer: number;
+    statut?: string;
+    statutPaiement?: string;
+  }>;
 }
 
 const EMPTY_FORM = {
@@ -44,12 +64,14 @@ const EMPTY_FORM = {
   irc: '',
   ice: '',
   cin: '',
-  date_echeance_paiement: '',
   notes: '',
 };
 
 export default function Fournisseurs({ profile }: FournisseursProps) {
   const isAdmin = profile?.roleId === 'admin';
+  // Confidentialité : les montants d'achat (totaux, soldes) ne sont visibles
+  // que pour les rôles financiers — jamais pour le caissier.
+  const canViewAmounts = isAdmin || profile?.roleId === 'tresorier';
 
   const [fournisseurs, setFournisseurs] = useState<Fournisseur[]>([]);
   const [loading, setLoading] = useState(true);
@@ -58,6 +80,10 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [saving, setSaving] = useState(false);
+
+  // Compte fournisseur (historique + total dû)
+  const [accountModal, setAccountModal] = useState<FournisseurAccount | null>(null);
+  const [loadingAccount, setLoadingAccount] = useState(false);
 
   const fetchFournisseurs = useCallback(async () => {
     setLoading(true);
@@ -68,24 +94,27 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
         .order('nom');
       if (error) throw error;
 
-      // Fetch total achats per fournisseur (validated only)
+      // Fetch total achats + solde dû per fournisseur (validated only)
       const { data: opsData } = await supabase
         .from('operations')
-        .select('fournisseur_id, total_dh')
+        .select('fournisseur_id, total_dh, reste_a_payer')
         .eq('type_op', 'achat')
         .eq('statut', 'valide')
         .not('fournisseur_id', 'is', null);
 
       const achatsMap: Record<number, number> = {};
+      const soldeMap: Record<number, number> = {};
       (opsData || []).forEach((op: any) => {
         const fid = op.fournisseur_id;
         achatsMap[fid] = (achatsMap[fid] || 0) + parseFloat(op.total_dh || 0);
+        soldeMap[fid] = (soldeMap[fid] || 0) + parseFloat(op.reste_a_payer || 0);
       });
 
       setFournisseurs(
         (fournsData || []).map((f: any) => ({
           ...f,
           _totalAchats: achatsMap[f.id_fournisseur] || 0,
+          _soldeDu: soldeMap[f.id_fournisseur] || 0,
         }))
       );
     } catch (err) {
@@ -113,10 +142,52 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
       irc: f.irc || '',
       ice: f.ice || '',
       cin: f.cin || '',
-      date_echeance_paiement: f.date_echeance_paiement || '',
       notes: f.notes || '',
     });
     setShowModal(true);
+  };
+
+  // ── Compte fournisseur : historique des achats + total dû ──────────────────
+  const openAccountModal = async (f: Fournisseur) => {
+    if (!canViewAmounts) return;
+    setLoadingAccount(true);
+    setAccountModal(null);
+    try {
+      const { data: opsData } = await supabase
+        .from('operations')
+        .select('num_op, date_op, total_dh, montant_paye, reste_a_payer, statut, statut_paiement')
+        .eq('fournisseur_id', f.id_fournisseur)
+        .eq('type_op', 'achat')
+        .order('num_op', { ascending: false })
+        .limit(20);
+
+      const ops = opsData || [];
+      const valides = ops.filter((op: any) => op.statut === 'valide');
+      const totalAchats = valides.reduce((s: number, op: any) => s + parseFloat(op.total_dh || 0), 0);
+      const totalPaye = valides.reduce((s: number, op: any) => s + parseFloat(op.montant_paye || 0), 0);
+      const soldeDu = valides.reduce((s: number, op: any) => s + parseFloat(op.reste_a_payer || 0), 0);
+
+      setAccountModal({
+        fournisseurId: f.id_fournisseur,
+        nom: f.nom,
+        totalAchats,
+        totalPaye,
+        soldeDu,
+        nbOperations: ops.length,
+        recentOps: ops.map((op: any) => ({
+          numOp: op.num_op,
+          dateOp: op.date_op,
+          totalDh: parseFloat(op.total_dh || 0),
+          resteAPayer: parseFloat(op.reste_a_payer || 0),
+          statut: op.statut,
+          statutPaiement: op.statut_paiement,
+        })),
+      });
+    } catch (err) {
+      console.error('[Fournisseurs] account:', err);
+    } finally {
+      setLoadingAccount(false);
+    }
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -131,7 +202,6 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
         irc: form.type === 'Société' ? (form.irc.trim() || null) : null,
         ice: form.type === 'Société' ? (form.ice.trim() || null) : null,
         cin: form.type === 'Personne physique' ? (form.cin.trim() || null) : null,
-        date_echeance_paiement: form.date_echeance_paiement.trim() || null,
         notes: form.notes.trim() || null,
       };
 
@@ -251,9 +321,9 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
                     <th className="px-5 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Fournisseur</th>
                     <th className="px-5 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Contact</th>
                     <th className="px-5 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Identifiants</th>
-                    <th className="px-5 py-3 text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">Échéance</th>
+                    <th className="px-5 py-3 text-right text-[10px] font-black text-slate-400 uppercase tracking-widest">Solde dû</th>
                     <th className="px-5 py-3 text-right text-[10px] font-black text-slate-400 uppercase tracking-widest">Total achats</th>
-                    {isAdmin && (
+                    {canViewAmounts && (
                       <th className="px-5 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">Actions</th>
                     )}
                   </tr>
@@ -314,49 +384,60 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
                           </div>
                         )}
                       </td>
-                      {/* Échéance */}
-                      <td className="px-5 py-4">
-                        {f.date_echeance_paiement ? (() => {
-                          const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
-                          const diff = Math.ceil((new Date(f.date_echeance_paiement).getTime() - new Date(today).getTime()) / 86400000);
-                          const isOverdue = diff < 0;
-                          const isSoon = diff >= 0 && diff <= 7;
-                          return (
-                            <div className={cn(
-                              'flex items-center gap-1.5 px-2 py-1 rounded-lg w-fit text-xs font-bold',
-                              isOverdue ? 'bg-rose-100 text-rose-700' : isSoon ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-700'
-                            )}>
-                              {isOverdue ? <AlertTriangle className="h-3 w-3" /> : <Clock className="h-3 w-3" />}
-                              {isOverdue ? `${Math.abs(diff)}j échu` : isSoon ? `${diff}j` : new Date(f.date_echeance_paiement).toLocaleDateString('fr-FR')}
-                            </div>
-                          );
-                        })() : <span className="text-slate-300 text-xs">—</span>}
-                      </td>
-                      {/* Total achats */}
+                      {/* Solde dû (comptes fournisseurs) — confidentiel pour caissier */}
                       <td className="px-5 py-4 text-right">
-                        <span className="font-black text-blue-700 text-sm">
-                          {(f._totalAchats ?? 0).toFixed(2)}
-                          <span className="text-slate-400 font-normal text-xs ml-0.5">DH</span>
-                        </span>
+                        {!canViewAmounts ? (
+                          <span className="inline-flex items-center gap-1 text-slate-300"><Lock className="h-3 w-3" /><span className="text-xs">•••</span></span>
+                        ) : (f._soldeDu ?? 0) > 0.01 ? (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-rose-50 text-rose-700 text-xs font-black">
+                            <AlertTriangle className="h-3 w-3" />
+                            {(f._soldeDu ?? 0).toFixed(2)} DH
+                          </span>
+                        ) : (
+                          <span className="text-xs font-bold text-emerald-600">Soldé</span>
+                        )}
                       </td>
-                      {/* Actions (admin only) */}
-                      {isAdmin && (
+                      {/* Total achats — confidentiel pour caissier */}
+                      <td className="px-5 py-4 text-right">
+                        {canViewAmounts ? (
+                          <span className="font-black text-blue-700 text-sm">
+                            {(f._totalAchats ?? 0).toFixed(2)}
+                            <span className="text-slate-400 font-normal text-xs ml-0.5">DH</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-slate-300"><Lock className="h-3 w-3" /><span className="text-xs">•••</span></span>
+                        )}
+                      </td>
+                      {/* Actions */}
+                      {canViewAmounts && (
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-1.5">
                             <button
-                              onClick={() => openEdit(f)}
-                              className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
-                              title="Modifier"
+                              onClick={() => openAccountModal(f)}
+                              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-all"
+                              title="Compte fournisseur — historique et total dû"
                             >
-                              <Edit2 className="h-4 w-4" />
+                              <Eye className="h-3.5 w-3.5" />
+                              Compte
                             </button>
-                            <button
-                              onClick={() => handleDelete(f.id_fournisseur, f.nom)}
-                              className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all"
-                              title="Supprimer"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
+                            {isAdmin && (
+                              <>
+                                <button
+                                  onClick={() => openEdit(f)}
+                                  className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                                  title="Modifier"
+                                >
+                                  <Edit2 className="h-4 w-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleDelete(f.id_fournisseur, f.nom)}
+                                  className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all"
+                                  title="Supprimer"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              </>
+                            )}
                           </div>
                         </td>
                       )}
@@ -474,17 +555,6 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
                   </div>
                 )}
 
-                {/* Échéance paiement */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Date d'échéance paiement</label>
-                  <input
-                    type="date"
-                    className="w-full bg-slate-50 border-none rounded-xl py-3 px-4 text-sm font-bold focus:ring-2 focus:ring-blue-500/20"
-                    value={form.date_echeance_paiement}
-                    onChange={(e) => setForm({ ...form, date_echeance_paiement: e.target.value })}
-                  />
-                </div>
-
                 {/* Notes */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Notes</label>
@@ -511,6 +581,110 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Modal Compte Fournisseur (admin / trésorier) ── */}
+      <AnimatePresence>
+        {(loadingAccount || accountModal) && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => { setAccountModal(null); setLoadingAccount(false); }}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-xl bg-white rounded-[28px] shadow-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+                <div>
+                  <h3 className="text-lg font-black text-slate-900 uppercase tracking-tight flex items-center gap-2">
+                    <Building2 className="h-5 w-5 text-blue-500" />
+                    {accountModal?.nom || '…'}
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium mt-0.5">Compte fournisseur — {accountModal?.nbOperations ?? 0} achat(s)</p>
+                </div>
+                <button
+                  onClick={() => { setAccountModal(null); setLoadingAccount(false); }}
+                  className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-slate-900"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {loadingAccount && !accountModal ? (
+                <div className="flex items-center justify-center py-16">
+                  <div className="h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : accountModal ? (
+                <div className="p-6 space-y-5">
+                  {/* KPI row */}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-slate-50 rounded-2xl p-4 text-center border border-slate-100">
+                      <div className="flex items-center justify-center mb-1">
+                        <ShoppingBag className="h-4 w-4 text-blue-500" />
+                      </div>
+                      <p className="text-lg font-black text-slate-900">{accountModal.totalAchats.toFixed(0)}<span className="text-xs font-bold text-slate-400 ml-0.5">DH</span></p>
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Total achats</p>
+                    </div>
+                    <div className="bg-emerald-50 rounded-2xl p-4 text-center border border-emerald-100">
+                      <div className="flex items-center justify-center mb-1">
+                        <TrendingUp className="h-4 w-4 text-emerald-500" />
+                      </div>
+                      <p className="text-lg font-black text-emerald-700">{accountModal.totalPaye.toFixed(0)}<span className="text-xs font-bold text-emerald-400 ml-0.5">DH</span></p>
+                      <p className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mt-1">Total payé</p>
+                    </div>
+                    <div className={cn('rounded-2xl p-4 text-center border', accountModal.soldeDu > 0.01 ? 'bg-rose-50 border-rose-100' : 'bg-slate-50 border-slate-100')}>
+                      <div className="flex items-center justify-center mb-1">
+                        <CreditCard className={cn('h-4 w-4', accountModal.soldeDu > 0.01 ? 'text-rose-500' : 'text-slate-400')} />
+                      </div>
+                      <p className={cn('text-lg font-black', accountModal.soldeDu > 0.01 ? 'text-rose-700' : 'text-slate-500')}>
+                        {accountModal.soldeDu.toFixed(0)}<span className="text-xs font-bold ml-0.5">DH</span>
+                      </p>
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Reste à payer</p>
+                    </div>
+                  </div>
+
+                  {/* Recent operations */}
+                  <div>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Derniers achats</p>
+                    {accountModal.recentOps.length === 0 ? (
+                      <p className="text-xs text-slate-400 font-medium italic">Aucun achat enregistré pour ce fournisseur.</p>
+                    ) : (
+                      <div className="space-y-2 max-h-52 overflow-y-auto">
+                        {accountModal.recentOps.map((op) => (
+                          <div key={op.numOp} className="flex items-center justify-between bg-slate-50 rounded-xl px-4 py-2.5 border border-slate-100">
+                            <div>
+                              <p className="text-xs font-black text-slate-700">
+                                OP-{String(op.numOp).padStart(4, '0')}
+                                {op.statut === 'en_attente' && (
+                                  <span className="ml-2 text-[9px] font-black text-orange-700 bg-orange-100 px-1.5 py-0.5 rounded-md uppercase tracking-wider">En attente</span>
+                                )}
+                              </p>
+                              <p className="text-[10px] text-slate-400 font-medium">
+                                {op.dateOp ? new Date(op.dateOp).toLocaleDateString('fr-FR') : '—'}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-sm font-black text-slate-900">{op.totalDh.toFixed(2)} DH</p>
+                              {op.resteAPayer > 0.01 ? (
+                                <p className="text-[10px] font-bold text-rose-600">Reste: {op.resteAPayer.toFixed(2)} DH</p>
+                              ) : op.statut === 'valide' ? (
+                                <p className="text-[10px] font-bold text-emerald-600">Soldé</p>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
             </motion.div>
           </div>
         )}

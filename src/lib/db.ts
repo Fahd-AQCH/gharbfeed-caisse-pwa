@@ -27,6 +27,7 @@ export interface LocalClient {
   nom_prenom: string;
   num_telephone?: string | null;
   fonction?: string | null;
+  actif?: boolean;        // false = client désactivé (exclu du sélecteur caisse)
 }
 
 export interface LocalFournisseur {
@@ -49,6 +50,7 @@ export interface SyncQueueItem {
   retryCount: number;
   lastError?: string | null;
   createdAt: number;                // Unix ms timestamp
+  stockApplied?: boolean;           // true une fois les deltas de stock poussés (anti double-application au retry)
 }
 
 // ── Dexie class ───────────────────────────────────────────────────────────────

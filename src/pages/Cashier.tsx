@@ -66,15 +66,17 @@ export default function Cashier({ profile }: CashierProps) {
     isActive:      p.is_active !== false,
   }));
 
-  const clients: Client[] = (liveClients ?? []).map((c) => ({
-    id:        String(c.id_client),
-    name:      c.nom_prenom,
-    phone:     c.num_telephone ?? '',
-    address:   '',
-    function:  c.fonction ?? '',
-    createdAt: new Date() as any,
-    updatedAt: new Date() as any,
-  }));
+  const clients: Client[] = (liveClients ?? [])
+    .filter((c) => c.actif !== false) // clients désactivés exclus de la caisse
+    .map((c) => ({
+      id:        String(c.id_client),
+      name:      c.nom_prenom,
+      phone:     c.num_telephone ?? '',
+      address:   '',
+      function:  c.fonction ?? '',
+      createdAt: new Date() as any,
+      updatedAt: new Date() as any,
+    }));
 
   const fournisseurs: any[] = (liveFourns ?? []).map((f) => ({
     id_fournisseur: f.id_fournisseur,
@@ -497,25 +499,14 @@ export default function Cashier({ profile }: CashierProps) {
       );
       if (itemsErr) throw itemsErr;
 
-      // Restock products individually (fail-safe per-item)
+      // Restock products individually (fail-safe per-item, RPC atomique)
       for (const item of toReturn) {
-        try {
-          const { data: dbProd } = await supabase
-            .from('produits')
-            .select('stock_actuel, qte_vente, prix_vente')
-            .eq('code', item.productId)
-            .single();
-          if (dbProd) {
-            const newStock = parseFloat(dbProd.stock_actuel ?? 0) + item.returnQty;
-            await supabase.from('produits').update({
-              stock_actuel: newStock,
-              qte_vente: Math.max(0, parseFloat(dbProd.qte_vente ?? 0) - item.returnQty),
-              valeur_stock: newStock * parseFloat(dbProd.prix_vente ?? 0),
-            }).eq('code', item.productId);
-          }
-        } catch (restockErr) {
-          console.error(`[Cashier] restock ${item.productId}:`, restockErr);
-        }
+        const { error: rpcErr } = await supabase.rpc('apply_stock_delta', {
+          p_code: item.productId,
+          p_delta_stock: item.returnQty,
+          p_delta_qte_vente: -item.returnQty,
+        });
+        if (rpcErr) console.error(`[Cashier] restock ${item.productId}:`, rpcErr.message);
       }
 
       // Optimistic Dexie update — useLiveQuery propagates the change to the UI
@@ -608,27 +599,19 @@ export default function Cashier({ profile }: CashierProps) {
         }
       }
 
-      // ── REMOTE STOCK UPDATE (online only — runs after Dexie for atomicity) ─
+      // ── REMOTE STOCK UPDATE (online only) ──────────────────────────────────
+      // RPC atomique : un seul UPDATE SQL côté serveur — pas de course possible
+      // entre deux caisses simultanées (l'ancien SELECT→UPDATE perdait des ventes).
       if (isVente && !queued) {
         for (const item of cart) {
           const product = products.find((p) => p.id === item.productId);
           if (!product) continue;
-
-          const { data: dbProd } = await supabase
-            .from('produits')
-            .select('stock_actuel, qte_vente, prix_vente')
-            .eq('code', product.code)
-            .single();
-
-          const currentStock = dbProd ? parseFloat(dbProd.stock_actuel || 0) : product.stockActual;
-          const currentQteVente = dbProd ? parseFloat(dbProd.qte_vente || 0) : 0;
-          const price = dbProd ? parseFloat(dbProd.prix_vente || 0) : product.defaultPrice;
-          const newStock = currentStock - item.quantity;
-
-          await supabase
-            .from('produits')
-            .update({ stock_actuel: newStock, qte_vente: currentQteVente + item.quantity, valeur_stock: newStock * price })
-            .eq('code', product.code);
+          const { error: rpcErr } = await supabase.rpc('apply_stock_delta', {
+            p_code: product.code,
+            p_delta_stock: -item.quantity,
+            p_delta_qte_vente: item.quantity,
+          });
+          if (rpcErr) console.error(`[Cashier] apply_stock_delta ${product.code}:`, rpcErr.message);
         }
       }
 
@@ -875,7 +858,7 @@ export default function Cashier({ profile }: CashierProps) {
                 <div className="flex-1 min-w-0">
                   <p className="font-bold text-slate-900 truncate text-sm">{item.name}</p>
                   <p className="text-[11px] text-slate-400 font-medium">
-                    {operationType === 'achat' && !isAdmin ? '— DH/u' : `${item.unitPrice.toFixed(2)} DH/u`}
+                    {hideAchatAmounts ? '— DH/u' : `${item.unitPrice.toFixed(2)} DH/u`}
                   </p>
                 </div>
                 <div className="flex items-center gap-0.5 bg-white rounded-lg p-0.5 border border-slate-200">
@@ -893,7 +876,8 @@ export default function Cashier({ profile }: CashierProps) {
                   </button>
                 </div>
                 <div className="text-right w-16 shrink-0">
-                  <p className="font-black text-sm text-slate-800">{item.lineTotal.toFixed(2)}</p>
+                  {/* Confidentialité : total de ligne masqué (total ÷ qté = prix d'achat déductible) */}
+                  <p className="font-black text-sm text-slate-800">{hideAchatAmounts ? '—' : item.lineTotal.toFixed(2)}</p>
                   <p className="text-[9px] text-slate-400">DH</p>
                 </div>
                 <button onClick={() => removeFromCart(item.productId)} className="p-1.5 opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 transition-all">
@@ -1029,7 +1013,7 @@ export default function Cashier({ profile }: CashierProps) {
                       <div key={item.productId} className="flex justify-between items-center text-sm">
                         <span className="text-slate-700 font-medium truncate mr-2">{item.name} <span className="text-slate-400">× {item.quantity}</span></span>
                         <span className="font-bold text-slate-900 shrink-0">
-                          {operationType === 'achat' && !isAdmin ? '—' : `${item.lineTotal.toFixed(2)} DH`}
+                          {hideAchatAmounts ? '—' : `${item.lineTotal.toFixed(2)} DH`}
                         </span>
                       </div>
                     ))}

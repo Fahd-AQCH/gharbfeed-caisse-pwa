@@ -12,9 +12,12 @@ import {
   Calendar,
   CheckCircle2,
   Loader2,
+  Download,
+  FilterX,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
+import * as XLSX from 'xlsx';
 
 interface ExpensesProps {
   profile: UserProfile | null;
@@ -57,6 +60,10 @@ export default function Expenses({ profile }: ExpensesProps) {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState('');
+  // Filtres temporels : mois rapide OU période personnalisée (exclusifs)
+  const [filterMonth, setFilterMonth] = useState('');   // 'YYYY-MM'
+  const [dateFrom, setDateFrom] = useState('');         // 'YYYY-MM-DD'
+  const [dateTo, setDateTo] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState({ ...EMPTY_FORM });
@@ -194,6 +201,8 @@ export default function Expenses({ profile }: ExpensesProps) {
     ? last3.reduce((s, e) => s + e.montant, 0) / 3
     : 0;
 
+  const hasDateFilter = !!(filterMonth || dateFrom || dateTo);
+
   const filtered = expenses.filter((e) => {
     const q = search.toLowerCase();
     const matchSearch = !q ||
@@ -201,8 +210,41 @@ export default function Expenses({ profile }: ExpensesProps) {
       (e.typeCharge || '').toLowerCase().includes(q) ||
       (e.agentName || '').toLowerCase().includes(q);
     const matchType = !filterType || e.typeCharge === filterType;
-    return matchSearch && matchType;
+    const d = e.dateCharge || '';
+    const matchMonth = !filterMonth || d.startsWith(filterMonth);
+    const matchFrom = !dateFrom || d >= dateFrom;
+    const matchTo = !dateTo || d <= dateTo;
+    return matchSearch && matchType && matchMonth && matchFrom && matchTo;
   });
+
+  const totalFiltered = filtered.reduce((s, e) => s + e.montant, 0);
+
+  const resetDateFilters = () => { setFilterMonth(''); setDateFrom(''); setDateTo(''); };
+
+  // ── Export Excel des charges filtrées ───────────────────────────────────────
+  const handleExportExcel = () => {
+    if (filtered.length === 0) { alert('Aucune charge à exporter avec ces filtres.'); return; }
+    const rows = filtered.map((e) => ({
+      'Date':            e.dateCharge || '',
+      'Heure':           e.heureCharge ? e.heureCharge.slice(0, 5) : '',
+      'Type':            e.typeCharge,
+      'Description':     e.description || '',
+      'Montant (DH)':    e.montant.toFixed(2),
+      'Mode paiement':   e.modePaiement,
+      'Agent':           e.agentName || '',
+    }));
+    // Ligne de total en bas
+    rows.push({
+      'Date': '', 'Heure': '', 'Type': '', 'Description': 'TOTAL',
+      'Montant (DH)': totalFiltered.toFixed(2), 'Mode paiement': '', 'Agent': '',
+    });
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = [{ wch: 12 }, { wch: 7 }, { wch: 18 }, { wch: 36 }, { wch: 14 }, { wch: 14 }, { wch: 18 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Charges');
+    const period = filterMonth || [dateFrom, dateTo].filter(Boolean).join('_au_') || 'toutes_periodes';
+    XLSX.writeFile(wb, `charges_gharbfeed_${period}.xlsx`);
+  };
 
   return (
     <div className="h-full overflow-y-auto p-8">
@@ -276,25 +318,84 @@ export default function Expenses({ profile }: ExpensesProps) {
         </div>
 
         {/* Filters */}
-        <div className="flex flex-col sm:flex-row gap-3">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Rechercher par description, type, agent..."
-              className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-orange-500/10 transition-all"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 space-y-3">
+          <div className="flex flex-col sm:flex-row gap-3">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Rechercher par description, type, agent..."
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-orange-500/10 transition-all"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            <select
+              className="bg-slate-50 border border-slate-200 rounded-xl py-3 px-4 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-orange-500/10 transition-all"
+              value={filterType}
+              onChange={(e) => setFilterType(e.target.value)}
+            >
+              <option value="">Tous les types</option>
+              {EXPENSE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <button
+              onClick={handleExportExcel}
+              className="flex items-center justify-center gap-2 px-5 py-3 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-sm rounded-xl shadow-sm shadow-emerald-500/20 transition-all shrink-0"
+              title="Exporter les charges filtrées vers Excel"
+            >
+              <Download className="h-4 w-4" />
+              Export Excel
+            </button>
           </div>
-          <select
-            className="bg-white border border-slate-200 rounded-xl py-3 px-4 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-orange-500/10 transition-all"
-            value={filterType}
-            onChange={(e) => setFilterType(e.target.value)}
-          >
-            <option value="">Tous les types</option>
-            {EXPENSE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
+
+          {/* Filtres temporels */}
+          <div className="flex flex-col lg:flex-row lg:items-end gap-3 pt-1">
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Mois</label>
+              <input
+                type="month"
+                className="bg-slate-50 border border-slate-200 rounded-xl py-2.5 px-3 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-orange-500/10"
+                value={filterMonth}
+                onChange={(e) => { setFilterMonth(e.target.value); setDateFrom(''); setDateTo(''); }}
+              />
+            </div>
+            <span className="hidden lg:block text-[10px] font-black text-slate-300 uppercase pb-3">— ou —</span>
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Du</label>
+              <input
+                type="date"
+                className="bg-slate-50 border border-slate-200 rounded-xl py-2.5 px-3 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-orange-500/10"
+                value={dateFrom}
+                onChange={(e) => { setDateFrom(e.target.value); setFilterMonth(''); }}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Au</label>
+              <input
+                type="date"
+                className="bg-slate-50 border border-slate-200 rounded-xl py-2.5 px-3 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-orange-500/10"
+                value={dateTo}
+                min={dateFrom || undefined}
+                onChange={(e) => { setDateTo(e.target.value); setFilterMonth(''); }}
+              />
+            </div>
+            {hasDateFilter && (
+              <button
+                onClick={resetDateFilters}
+                className="flex items-center gap-1.5 px-3 py-2.5 text-xs font-bold text-slate-500 bg-slate-50 border border-slate-200 rounded-xl hover:bg-slate-100 transition-all"
+              >
+                <FilterX className="h-3.5 w-3.5" />
+                Réinitialiser
+              </button>
+            )}
+            {(hasDateFilter || filterType || search) && (
+              <div className="lg:ml-auto flex items-center gap-2 bg-orange-50 border border-orange-200 rounded-xl px-4 py-2.5">
+                <span className="text-[10px] font-black text-orange-600 uppercase tracking-widest">Total période filtrée</span>
+                <span className="text-sm font-black text-orange-700">{totalFiltered.toFixed(2)} DH</span>
+                <span className="text-[10px] font-bold text-orange-400">({filtered.length} charge{filtered.length > 1 ? 's' : ''})</span>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Table */}

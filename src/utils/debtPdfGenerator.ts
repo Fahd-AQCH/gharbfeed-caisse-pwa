@@ -4,7 +4,8 @@ import { drawPdfLogo } from './pdfLogo';
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface DebtPaymentReceiptData {
   operationNumber: string;    // e.g. "OP-0042"
-  clientName: string;
+  clientName: string;         // nom de la contrepartie (client ou fournisseur)
+  counterpartyLabel?: string; // 'Client' (défaut) ou 'Fournisseur' (comptes à payer)
   totalOriginal: number;      // original operation total
   montantCePaiement: number;  // amount paid in this payment
   totalDejaPaye: number;      // previously paid before this payment
@@ -51,7 +52,7 @@ export function generateDebtPaymentPDF(data: DebtPaymentReceiptData): void {
   doc.setFontSize(7);
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(...C.slate400);
-  doc.text('Alimentation Animale · Gestion de Stock', margin + 22, y + 14.5);
+  doc.text("Alimentation animale et Matériel d'élevage", margin + 22, y + 14.5);
 
   doc.setFillColor(...C.emerald);
   doc.roundedRect(pageW - margin - 30, y + 6, 26, 9, 2, 2, 'F');
@@ -84,7 +85,7 @@ export function generateDebtPaymentPDF(data: DebtPaymentReceiptData): void {
     ['Mode',           data.conditionPaiement],
   ];
   const rightInfo: [string, string][] = [
-    ['Client', data.clientName || 'Comptoir'],
+    [data.counterpartyLabel || 'Client', data.clientName || 'Comptoir'],
     ['Heure',  data.heurePaiement ? data.heurePaiement.slice(0, 5) : '—'],
     ['Réf.',   data.refPaiement   || '—'],
   ];

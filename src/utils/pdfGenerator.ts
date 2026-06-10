@@ -79,7 +79,7 @@ export function generateTicketPDF(
   doc.setFontSize(7);
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(...COLORS.slate400);
-  doc.text('Alimentation Animale · Gestion de Stock', margin + 22, y + 14.5);
+  doc.text("Alimentation animale et Matériel d'élevage", margin + 22, y + 14.5);
 
   // Badge type opération (droite)
   const badgeLabel = operation.type === 'vente' ? '  VENTE  ' : '  ACHAT  ';
@@ -177,7 +177,8 @@ export function generateTicketPDF(
     columnStyles: {
       0: { cellWidth: 18, fontStyle: 'bold', textColor: COLORS.slate400 as any },
       1: { cellWidth: 'auto' },
-      2: { cellWidth: 10, halign: 'center', fontStyle: 'bold' },
+      // 14mm : assez large pour que l'en-tête « Qté » tienne sur une seule ligne
+      2: { cellWidth: 14, halign: 'center', fontStyle: 'bold' },
       3: { cellWidth: 22, halign: 'right' },
       4: { cellWidth: 22, halign: 'right', fontStyle: 'bold' },
     },
@@ -259,8 +260,8 @@ export function generateTicketPDF(
 
   y = y + totalsH + 8;
 
-  // ── 5. PIED DE PAGE ───────────────────────────────────────────────────────
-  const footerY = pageH - 10;
+  // ── 5. PIED DE PAGE (2 lignes : coordonnées + message de confiance) ────────
+  const footerY = pageH - 13;
 
   // Ligne séparatrice pied de page
   doc.setDrawColor(...COLORS.slate100);
@@ -272,8 +273,15 @@ export function generateTicketPDF(
   doc.setTextColor(...COLORS.slate400);
   const now = new Date().toLocaleString('fr-FR');
   doc.text(`Imprimé le ${now}`, margin, footerY);
-  doc.text('GharbFeed v1.2 · Système de Gestion de Stock', pageW / 2, footerY, { align: 'center' });
-  doc.text(`Merci de votre ${operation.type === 'vente' ? 'achat' : 'livraison'} !`, pageW - margin, footerY, { align: 'right' });
+  doc.text('GharbFeed - Souk larbaa lgharb, Lot Zohour, num 68 - +212663775265', pageW - margin, footerY, { align: 'right' });
+
+  doc.setFont('helvetica', 'bolditalic');
+  doc.setFontSize(7);
+  doc.setTextColor(...COLORS.slate700);
+  doc.text(
+    'Merci pour votre confiance ! Les marchandises vendues ne sont reprises qu\'avec Ticket.',
+    pageW / 2, footerY + 5, { align: 'center' }
+  );
 
   // ── 6. Téléchargement direct (évite window.open → perte de focus / race auth) ─
   const filename = `ticket_${operation.type}_${operation.id}_${operation.date}.pdf`;

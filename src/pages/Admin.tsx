@@ -128,8 +128,8 @@ export default function Admin({ profile }: AdminProps) {
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   // '' = rolling 12 months (default) | 'YYYY-MM' = specific month filter
   const [selectedPeriod, setSelectedPeriod] = useState('');
-  const [kpis, setKpis] = useState({ caMois: 0, valeurStock: 0, margeBrute: 0, achatsMois: 0 });
-  const [caMonthly, setCaMonthly] = useState<{ mois: string; CA: number; Achats: number }[]>([]);
+  const [kpis, setKpis] = useState({ caMois: 0, valeurStock: 0, margeBrute: 0, achatsMois: 0, chargesMois: 0, beneficeNet: 0 });
+  const [caMonthly, setCaMonthly] = useState<{ mois: string; CA: number; Achats: number; Charges: number }[]>([]);
   const [topProduits, setTopProduits] = useState<{ name: string; qte: number }[]>([]);
   const [caCategorie, setCaCategorie] = useState<{ name: string; value: number }[]>([]);
   const [paiementsPie, setPaiementsPie] = useState<{ name: string; value: number }[]>([]);
@@ -474,11 +474,19 @@ export default function Admin({ profile }: AdminProps) {
         .order('date_op');
       if (endDateStr) opsQuery = opsQuery.lte('date_op', endDateStr);
 
+      // Charges & dépenses sur la même fenêtre temporelle que les opérations
+      let chargesQuery = supabase
+        .from('charges')
+        .select('date_charge, montant')
+        .gte('date_charge', startDateStr);
+      if (endDateStr) chargesQuery = chargesQuery.lte('date_charge', endDateStr);
+
       const [
         { data: opsData },
         { data: produitsData },
         { data: fournsData },
         { data: allAchatsOps },
+        { data: chargesData },
       ] = await Promise.all([
         opsQuery,
         supabase.from('produits').select('code, produit, qte_vente, valeur_stock, categorie'),
@@ -489,34 +497,47 @@ export default function Admin({ profile }: AdminProps) {
           .eq('type_op', 'achat')
           .eq('statut', 'valide')
           .not('fournisseur_id', 'is', null),
+        chargesQuery,
       ]);
 
       const ops = opsData || [];
       const produits = produitsData || [];
       const fourn = fournsData || [];
       const allAchats = allAchatsOps || [];
+      const charges = chargesData || [];
 
       // ── KPIs ──────────────────────────────────────────────────────────────
-      let caMois = 0, achatsMois = 0;
+      let caMois = 0, achatsMois = 0, chargesMois = 0;
       ops.forEach((op: any) => {
         if (op.date_op >= firstDayThisMonth) {
           if (op.type_op === 'vente') caMois += parseFloat(op.total_dh || 0);
           else achatsMois += parseFloat(op.total_dh || 0);
         }
       });
+      charges.forEach((c: any) => {
+        if (c.date_charge >= firstDayThisMonth) chargesMois += parseFloat(c.montant || 0);
+      });
       const valeurStock = produits.reduce((s: number, p: any) => s + parseFloat(p.valeur_stock || 0), 0);
-      setKpis({ caMois, valeurStock, margeBrute: caMois - achatsMois, achatsMois });
+      // Bénéfice net réel = CA − Achats − Charges (le vrai résultat du mois)
+      setKpis({
+        caMois,
+        valeurStock,
+        margeBrute: caMois - achatsMois,
+        achatsMois,
+        chargesMois,
+        beneficeNet: caMois - achatsMois - chargesMois,
+      });
 
       // ── Données mensuelles ────────────────────────────────────────────────
       // Specific month → single bucket; rolling → 12 buckets (all pre-seeded to 0)
-      const monthlyMap: Record<string, { CA: number; Achats: number }> = {};
+      const monthlyMap: Record<string, { CA: number; Achats: number; Charges: number }> = {};
       if (selectedPeriod) {
-        monthlyMap[selectedPeriod] = { CA: 0, Achats: 0 };
+        monthlyMap[selectedPeriod] = { CA: 0, Achats: 0, Charges: 0 };
       } else {
         for (let i = 0; i < 12; i++) {
           const d = new Date(todayYear, todayMonth - 1 - 11 + i, 1);
           const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-          monthlyMap[key] = { CA: 0, Achats: 0 };
+          monthlyMap[key] = { CA: 0, Achats: 0, Charges: 0 };
         }
       }
       ops.forEach((op: any) => {
@@ -526,6 +547,10 @@ export default function Admin({ profile }: AdminProps) {
           else monthlyMap[k].Achats += parseFloat(op.total_dh || 0);
         }
       });
+      charges.forEach((c: any) => {
+        const k = c.date_charge?.slice(0, 7);
+        if (k && monthlyMap[k]) monthlyMap[k].Charges += parseFloat(c.montant || 0);
+      });
       setCaMonthly(
         Object.entries(monthlyMap).map(([key, val]) => {
           const [y, m] = key.split('-');
@@ -533,6 +558,7 @@ export default function Admin({ profile }: AdminProps) {
             mois: `${MONTHS_FR[parseInt(m) - 1]} '${y.slice(2)}`,
             CA: Math.round(val.CA),
             Achats: Math.round(val.Achats),
+            Charges: Math.round(val.Charges),
           };
         })
       );
@@ -775,13 +801,15 @@ export default function Admin({ profile }: AdminProps) {
               </div>
             ) : (
               <>
-                {/* ── KPI Cards ────────────────────────────────────────────── */}
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                {/* ── KPI Cards — CA, Achats, Charges → Bénéfice NET ───────── */}
+                <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
                   {[
                     { label: 'CA Total (mois en cours)', value: kpis.caMois, color: 'emerald', icon: '📈' },
-                    { label: 'Valeur Stock Total', value: kpis.valeurStock, color: 'blue', icon: '📦' },
-                    { label: 'Marge Brute (mois)', value: kpis.margeBrute, color: kpis.margeBrute >= 0 ? 'amber' : 'rose', icon: '💰' },
                     { label: 'Achats validés (mois)', value: kpis.achatsMois, color: 'purple', icon: '🛒' },
+                    { label: 'Charges & Dépenses (mois)', value: kpis.chargesMois, color: 'orange', icon: '🧾' },
+                    { label: 'Marge Brute (CA − Achats)', value: kpis.margeBrute, color: kpis.margeBrute >= 0 ? 'amber' : 'rose', icon: '💰' },
+                    { label: 'Bénéfice NET (− charges)', value: kpis.beneficeNet, color: kpis.beneficeNet >= 0 ? 'emerald' : 'rose', icon: '🏆' },
+                    { label: 'Valeur Stock Total', value: kpis.valeurStock, color: 'blue', icon: '📦' },
                   ].map((kpi) => (
                     <div key={kpi.label} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
                       <div className="flex items-start justify-between mb-3">
@@ -793,6 +821,7 @@ export default function Admin({ profile }: AdminProps) {
                         kpi.color === 'emerald' ? 'text-emerald-600' :
                         kpi.color === 'blue'    ? 'text-blue-600'    :
                         kpi.color === 'amber'   ? 'text-amber-600'   :
+                        kpi.color === 'orange'  ? 'text-orange-600'  :
                         kpi.color === 'rose'    ? 'text-rose-500'    :
                         'text-purple-600'
                       )}>
@@ -841,9 +870,9 @@ export default function Admin({ profile }: AdminProps) {
                   ))}
                 </div>
 
-                {/* ── LineChart — Évolution CA & Achats 12 mois ───────────── */}
+                {/* ── LineChart — CA, Achats & Charges 12 mois ────────────── */}
                 <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-                  <h4 className="text-sm font-black text-slate-700 mb-5">Évolution CA &amp; Achats — 12 derniers mois</h4>
+                  <h4 className="text-sm font-black text-slate-700 mb-5">Évolution CA, Achats &amp; Charges — 12 derniers mois</h4>
                   {caMonthly.length === 0 ? (
                     <p className="text-center text-slate-400 text-sm py-10">Aucune donnée disponible</p>
                   ) : (
@@ -859,6 +888,7 @@ export default function Admin({ profile }: AdminProps) {
                         <Legend wrapperStyle={{ fontSize: '12px', fontWeight: 700 }} />
                         <Line type="monotone" dataKey="CA" stroke="#10b981" strokeWidth={2.5} dot={{ r: 3, fill: '#10b981' }} activeDot={{ r: 5 }} />
                         <Line type="monotone" dataKey="Achats" stroke="#8b5cf6" strokeWidth={2.5} dot={{ r: 3, fill: '#8b5cf6' }} activeDot={{ r: 5 }} strokeDasharray="5 5" />
+                        <Line type="monotone" dataKey="Charges" stroke="#f97316" strokeWidth={2.5} dot={{ r: 3, fill: '#f97316' }} activeDot={{ r: 5 }} strokeDasharray="2 3" />
                       </LineChart>
                     </ResponsiveContainer>
                   )}
@@ -867,9 +897,9 @@ export default function Admin({ profile }: AdminProps) {
                 {/* ── Row: BarChart grouped 6 mois + BarChart Top 5 produits ── */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-                  {/* BarChart grouped — Achats vs Ventes 6 derniers mois */}
+                  {/* BarChart grouped — Ventes vs Achats vs Charges 6 derniers mois */}
                   <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-                    <h4 className="text-sm font-black text-slate-700 mb-5">Achats vs Ventes — 6 derniers mois</h4>
+                    <h4 className="text-sm font-black text-slate-700 mb-5">Ventes vs Achats vs Charges — 6 derniers mois</h4>
                     {caMonthly.length === 0 ? (
                       <p className="text-center text-slate-400 text-sm py-10">Aucune donnée</p>
                     ) : (
@@ -885,6 +915,7 @@ export default function Admin({ profile }: AdminProps) {
                           <Legend wrapperStyle={{ fontSize: '12px', fontWeight: 700 }} />
                           <Bar dataKey="CA" fill="#10b981" radius={[4, 4, 0, 0] as [number, number, number, number]} />
                           <Bar dataKey="Achats" fill="#8b5cf6" radius={[4, 4, 0, 0] as [number, number, number, number]} />
+                          <Bar dataKey="Charges" fill="#f97316" radius={[4, 4, 0, 0] as [number, number, number, number]} />
                         </BarChart>
                       </ResponsiveContainer>
                     )}

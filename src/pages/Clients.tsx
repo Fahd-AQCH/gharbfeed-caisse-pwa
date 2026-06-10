@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Client, UserProfile } from '../types';
 import { supabase } from '../supabase';
-import { Users, Plus, Search, User, Phone, MapPin, Briefcase, Edit2, X, Loader2, Eye, TrendingUp, CreditCard, ShoppingBag } from 'lucide-react';
+import { Users, Plus, Search, User, Phone, MapPin, Briefcase, Edit2, X, Loader2, Eye, TrendingUp, CreditCard, ShoppingBag, Ban, RotateCcw, Trash2, AlertTriangle } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -26,12 +26,15 @@ interface ClientsProps {
 }
 
 export default function Clients({ profile }: ClientsProps) {
+  const isAdmin = profile?.roleId === 'admin';
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showInactive, setShowInactive] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [dupError, setDupError] = useState<string | null>(null);
 
   // Client account modal
   const [accountModal, setAccountModal] = useState<ClientAccount | null>(null);
@@ -61,6 +64,7 @@ export default function Clients({ profile }: ClientsProps) {
         phone: item.num_telephone,
         address: item.adresse,
         function: item.fonction,
+        actif: item.actif !== false,
         createdAt: new Date(),
         updatedAt: new Date()
       } as Client)));
@@ -71,8 +75,31 @@ export default function Clients({ profile }: ClientsProps) {
     }
   };
 
+  // ── Anti-doublons : nom (insensible casse/espaces), téléphone (chiffres), adresse ──
+  const normalizeText = (s?: string | null) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const normalizePhone = (s?: string | null) => (s || '').replace(/\D/g, '');
+
+  const findDuplicate = (): string | null => {
+    const nameN = normalizeText(newClient.name);
+    const phoneN = normalizePhone(newClient.phone);
+    const addrN = normalizeText(newClient.address);
+    for (const c of clients) {
+      if (editingClientId && c.id === editingClientId) continue;
+      if (nameN && normalizeText(c.name) === nameN)
+        return `Un client porte déjà ce nom : « ${c.name} » (fiche #${c.id}).`;
+      if (phoneN && normalizePhone(c.phone) === phoneN)
+        return `Ce numéro de téléphone est déjà attribué à « ${c.name} » (fiche #${c.id}).`;
+      if (addrN && normalizeText(c.address) === addrN)
+        return `Cette adresse est déjà enregistrée pour « ${c.name} » (fiche #${c.id}).`;
+    }
+    return null;
+  };
+
   const handleSaveClient = async (e: React.FormEvent) => {
     e.preventDefault();
+    setDupError(null);
+    const dup = findDuplicate();
+    if (dup) { setDupError(dup); return; }
     setSaving(true);
     try {
       if (editingClientId) {
@@ -105,6 +132,46 @@ export default function Clients({ profile }: ClientsProps) {
       console.error(err);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // ── Soft delete (désactivation) — réversible ───────────────────────────────
+  const handleToggleActif = async (client: Client) => {
+    const target = !(client.actif !== false);
+    if (!target && !window.confirm(`Désactiver le client « ${client.name} » ?\nIl n'apparaîtra plus dans les listes mais son historique est conservé.`)) return;
+    try {
+      const { error } = await supabase
+        .from('clients')
+        .update({ actif: target })
+        .eq('id_client', parseInt(client.id));
+      if (error) throw error;
+      fetchClients();
+    } catch (err) {
+      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  // ── Suppression définitive — bloquée si des opérations sont liées ──────────
+  const handlePermanentDelete = async (client: Client) => {
+    try {
+      const { count, error: cntErr } = await supabase
+        .from('operations')
+        .select('num_op', { count: 'exact', head: true })
+        .eq('client_id', parseInt(client.id));
+      if (cntErr) throw cntErr;
+      if (count && count > 0) {
+        alert(`Suppression impossible : ${count} opération(s) sont liées à « ${client.name} ».\nUtilisez plutôt la désactivation pour préserver l'historique.`);
+        return;
+      }
+      if (!window.confirm(`⚠ SUPPRESSION DÉFINITIVE de « ${client.name} »\n\nCette action est irréversible. Confirmer ?`)) return;
+      const { error } = await supabase
+        .from('clients')
+        .delete()
+        .eq('id_client', parseInt(client.id));
+      if (error) throw error;
+      fetchClients();
+    } catch (err) {
+      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -157,13 +224,16 @@ export default function Clients({ profile }: ClientsProps) {
       address: client.address || "",
       function: client.function || ""
     });
+    setDupError(null);
     setShowAddModal(true);
   };
 
-  const filtered = clients.filter(c => 
-    c.name.toLowerCase().includes(search.toLowerCase()) || 
-    (c.phone && c.phone.includes(search))
-  );
+  const filtered = clients.filter(c => {
+    if (!showInactive && c.actif === false) return false;
+    return c.name.toLowerCase().includes(search.toLowerCase()) ||
+      (c.phone && c.phone.includes(search));
+  });
+  const nbInactive = clients.filter(c => c.actif === false).length;
 
   return (
     <div className="h-full overflow-y-auto p-8">
@@ -177,6 +247,7 @@ export default function Clients({ profile }: ClientsProps) {
           onClick={() => {
             setEditingClientId(null);
             setNewClient({ name: "", phone: "", address: "", function: "" });
+            setDupError(null);
             setShowAddModal(true);
           }}
           className="bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 px-6 rounded-2xl flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all"
@@ -186,17 +257,31 @@ export default function Clients({ profile }: ClientsProps) {
         </button>
       </div>
 
-      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-        <div className="relative w-full">
+      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col sm:flex-row gap-3">
+        <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-          <input 
-            type="text" 
-            placeholder="Rechercher par nom ou téléphone..." 
+          <input
+            type="text"
+            placeholder="Rechercher par nom ou téléphone..."
             className="w-full bg-slate-50 border-none rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
+        {isAdmin && nbInactive > 0 && (
+          <button
+            onClick={() => setShowInactive(v => !v)}
+            className={cn(
+              'flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border transition-all shrink-0',
+              showInactive
+                ? 'bg-slate-700 text-white border-slate-700'
+                : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'
+            )}
+          >
+            <Ban className="h-3.5 w-3.5" />
+            Inactifs ({nbInactive})
+          </button>
+        )}
       </div>
 
       {loading ? (
@@ -206,7 +291,10 @@ export default function Clients({ profile }: ClientsProps) {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
           {filtered.map((client) => (
-            <div key={client.id} className="bg-white p-6 rounded-[32px] border border-slate-200 shadow-sm hover:shadow-xl transition-all group overflow-hidden relative">
+            <div key={client.id} className={cn(
+              'bg-white p-6 rounded-[32px] border shadow-sm hover:shadow-xl transition-all group overflow-hidden relative',
+              client.actif === false ? 'border-slate-300 opacity-60 grayscale-[40%]' : 'border-slate-200'
+            )}>
               <div className="absolute top-0 right-0 h-16 w-16 bg-emerald-50/50 rounded-bl-[40px] flex items-center justify-center translate-x-4 -translate-y-4 group-hover:translate-x-0 group-hover:-translate-y-0 transition-transform">
                 <User className="h-6 w-6 text-emerald-300" />
               </div>
@@ -217,9 +305,12 @@ export default function Clients({ profile }: ClientsProps) {
                 </div>
                 <div>
                   <h4 className="text-lg font-black text-slate-900 group-hover:text-emerald-600 transition-colors uppercase leading-tight">{client.name}</h4>
-                  <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-bold mt-1">
+                  <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-bold mt-1 flex-wrap">
                     <Briefcase className="h-3 w-3" />
                     {client.function || 'Particulier'}
+                    {client.actif === false && (
+                      <span className="text-[10px] font-black text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded-md uppercase tracking-wider">Désactivé</span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -243,13 +334,38 @@ export default function Clients({ profile }: ClientsProps) {
                   <Eye className="h-3.5 w-3.5" />
                   Voir compte
                 </button>
-                <button
-                  onClick={() => handleEditClick(client)}
-                  className="h-10 w-10 flex items-center justify-center rounded-xl bg-slate-50 text-slate-400 hover:bg-emerald-500 hover:text-white transition-all"
-                  title="Modifier"
-                >
-                  <Edit2 className="h-5 w-5" />
-                </button>
+                <div className="flex items-center gap-1.5">
+                  {isAdmin && (
+                    <>
+                      <button
+                        onClick={() => handleToggleActif(client)}
+                        className={cn(
+                          'h-10 w-10 flex items-center justify-center rounded-xl transition-all',
+                          client.actif === false
+                            ? 'bg-emerald-50 text-emerald-500 hover:bg-emerald-500 hover:text-white'
+                            : 'bg-slate-50 text-slate-400 hover:bg-amber-500 hover:text-white'
+                        )}
+                        title={client.actif === false ? 'Réactiver le client' : 'Désactiver (conserve l\'historique)'}
+                      >
+                        {client.actif === false ? <RotateCcw className="h-4 w-4" /> : <Ban className="h-4 w-4" />}
+                      </button>
+                      <button
+                        onClick={() => handlePermanentDelete(client)}
+                        className="h-10 w-10 flex items-center justify-center rounded-xl bg-slate-50 text-slate-400 hover:bg-rose-500 hover:text-white transition-all"
+                        title="Supprimer définitivement (impossible si opérations liées)"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </>
+                  )}
+                  <button
+                    onClick={() => handleEditClick(client)}
+                    className="h-10 w-10 flex items-center justify-center rounded-xl bg-slate-50 text-slate-400 hover:bg-emerald-500 hover:text-white transition-all"
+                    title="Modifier"
+                  >
+                    <Edit2 className="h-5 w-5" />
+                  </button>
+                </div>
               </div>
             </div>
           ))}
@@ -302,6 +418,15 @@ export default function Clients({ profile }: ClientsProps) {
               </div>
 
               <form onSubmit={handleSaveClient} className="p-8 space-y-6">
+                {dupError && (
+                  <div className="flex items-start gap-3 bg-rose-50 border border-rose-200 rounded-2xl p-4">
+                    <AlertTriangle className="h-5 w-5 text-rose-500 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-black text-rose-700">Doublon détecté</p>
+                      <p className="text-xs text-rose-600 font-medium mt-0.5">{dupError}</p>
+                    </div>
+                  </div>
+                )}
                 <div className="space-y-4">
                   <div className="space-y-2">
                     <label className="text-xs font-black text-slate-400 uppercase tracking-widest pl-1">Nom Complet</label>
