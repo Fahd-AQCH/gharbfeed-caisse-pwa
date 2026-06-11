@@ -87,6 +87,117 @@ export default function Debts({ profile }: DebtsProps) {
   useEffect(() => { fetchLatestClosure().then(setClosureLock); }, []);
   const isOpLocked = (d: DebtOp) => !isAdmin && isBeforeLock(d.dateOp, d.heureOp, closureLock);
 
+  // ── File des paiements caissier EN ATTENTE (validation admin) ──────────────
+  const [pendingPayments, setPendingPayments] = useState<(DebtPayment & { opNumber: string; counterpartyName: string })[]>([]);
+
+  const fetchPendingPayments = useCallback(async () => {
+    if (!isAdmin) return; // seule l'admin voit et traite la file
+    try {
+      const { data: pays } = await supabase
+        .from('debt_payments')
+        .select('*')
+        .eq('statut', 'en_attente')
+        .order('created_at', { ascending: true });
+      const rows = pays || [];
+      if (rows.length === 0) { setPendingPayments([]); return; }
+
+      const opIds = [...new Set(rows.map((p: any) => p.operation_id))];
+      const { data: opsData } = await supabase
+        .from('operations')
+        .select('num_op, client_id, fournisseur_id')
+        .in('num_op', opIds);
+      const opMap: Record<number, any> = {};
+      (opsData || []).forEach((o: any) => { opMap[o.num_op] = o; });
+
+      const clientIds = [...new Set((opsData || []).map((o: any) => o.client_id).filter(Boolean))];
+      const clientMap: Record<string, string> = {};
+      if (clientIds.length > 0) {
+        const { data: cl } = await supabase.from('clients').select('id_client, nom_prenom').in('id_client', clientIds);
+        (cl || []).forEach((c: any) => { clientMap[String(c.id_client)] = c.nom_prenom; });
+      }
+
+      const agentIds = [...new Set(rows.map((p: any) => p.utilisateur_id).filter(Boolean))];
+      const agentMap: Record<string, string> = {};
+      if (agentIds.length > 0) {
+        const { data: ag } = await supabase.from('utilisateurs').select('id, username, nom').in('id', agentIds);
+        (ag || []).forEach((a: any) => { agentMap[a.id] = a.nom || a.username || '—'; });
+      }
+
+      setPendingPayments(rows.map((p: any) => {
+        const op = opMap[p.operation_id];
+        return {
+          id: p.id,
+          operationId: p.operation_id,
+          montant: parseFloat(p.montant || 0),
+          datePaiement: p.date_paiement,
+          heurePaiement: p.heure_paiement,
+          conditionPaiement: p.condition_paiement,
+          refPaiement: p.ref_paiement,
+          utilisateurId: p.utilisateur_id,
+          agentName: p.utilisateur_id ? (agentMap[p.utilisateur_id] || '—') : '—',
+          notes: p.notes,
+          createdAt: p.created_at,
+          statut: 'en_attente' as const,
+          opNumber: `OP-${String(p.operation_id).padStart(4, '0')}`,
+          counterpartyName: op?.client_id ? (clientMap[String(op.client_id)] || `#${op.client_id}`) : 'Comptoir',
+        };
+      }));
+    } catch (err) {
+      console.error('[Debts] fetchPendingPayments:', err);
+    }
+  }, [isAdmin]);
+
+  useEffect(() => { fetchPendingPayments(); }, [fetchPendingPayments]);
+
+  // Validation admin : bascule le paiement en 'valide' ET reporte le montant
+  // sur l'opération (relecture fraîche = garde anti-dépassement du reste dû)
+  const handleValidatePendingPayment = async (p: DebtPayment & { opNumber: string; counterpartyName: string }) => {
+    try {
+      const { data: op, error: opErr } = await supabase
+        .from('operations')
+        .select('montant_paye, reste_a_payer')
+        .eq('num_op', p.operationId)
+        .single();
+      if (opErr) throw opErr;
+      const reste = parseFloat(op.reste_a_payer || 0);
+      if (p.montant > reste + 0.01) {
+        alert(`Validation impossible : le paiement (${p.montant.toFixed(2)} DH) dépasse le reste dû actuel (${reste.toFixed(2)} DH) de ${p.opNumber}.\nRejetez ce paiement ou corrigez la créance.`);
+        return;
+      }
+      const newPaye = parseFloat(op.montant_paye || 0) + p.montant;
+      const newReste = Math.max(0, reste - p.montant);
+
+      const { error: payErr } = await supabase.from('debt_payments').update({ statut: 'valide' }).eq('id', p.id);
+      if (payErr) throw payErr;
+      const { error: updErr } = await supabase.from('operations').update({
+        montant_paye: newPaye,
+        reste_a_payer: newReste,
+        statut_paiement: newReste <= 0.01 ? 'Payé' : 'Partiel',
+      }).eq('num_op', p.operationId);
+      if (updErr) throw updErr;
+
+      setPaymentHistories(prev => { const n = { ...prev }; delete n[p.operationId]; return n; });
+      setHistoryLoaded(false);
+      fetchPendingPayments();
+      fetchDebts();
+    } catch (err) {
+      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  // Rejet admin : le paiement passe en 'annule' (audit) — la créance reste intacte
+  const handleRejectPendingPayment = async (p: DebtPayment & { opNumber: string; counterpartyName: string }) => {
+    if (!window.confirm(`Rejeter le paiement de ${p.montant.toFixed(2)} DH (${p.opNumber} · ${p.counterpartyName}) ?\nIl sera marqué ANNULÉ et n'affectera pas la créance.`)) return;
+    try {
+      const { error } = await supabase.from('debt_payments').update({ statut: 'annule' }).eq('id', p.id);
+      if (error) throw error;
+      setPaymentHistories(prev => { const n = { ...prev }; delete n[p.operationId]; return n; });
+      fetchPendingPayments();
+    } catch (err) {
+      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
   // ── Crédits fournisseurs (comptes à payer) — admin / trésorier uniquement ──
   const [supplierOps, setSupplierOps] = useState<DebtOp[]>([]);
   const [supplierLoading, setSupplierLoading] = useState(false);
@@ -311,6 +422,7 @@ export default function Debts({ profile }: DebtsProps) {
         agentName: p.utilisateur_id ? (agentMap[p.utilisateur_id] || '—') : '—',
         notes: p.notes,
         createdAt: p.created_at,
+        statut: (p.statut ?? 'valide') as DebtPayment['statut'],
       }));
       setPaymentHistories(prev => ({ ...prev, [opId]: mapped }));
     } catch (err) {
@@ -356,6 +468,9 @@ export default function Debts({ profile }: DebtsProps) {
       const newMontantPaye = activeDebt.montantPaye + amount;
       const newResteAPayer = Math.max(0, activeDebt.resteAPayer - amount);
       const isSolde = newResteAPayer <= 0.01;
+      // Caissier → paiement EN ATTENTE : l'opération n'est PAS touchée tant que
+      // l'admin n'a pas validé (montant_paye/reste_a_payer figés, reçu provisoire)
+      const isPending = !canManage;
 
       const { error: payErr } = await supabase.from('debt_payments').insert({
         operation_id: activeDebt.numOp,
@@ -366,15 +481,18 @@ export default function Debts({ profile }: DebtsProps) {
         ref_paiement: payRef.trim() || null,
         utilisateur_id: profile.id,
         notes: payNotes.trim() || null,
+        statut: isPending ? 'en_attente' : 'valide',
       });
       if (payErr) throw payErr;
 
-      const { error: updateErr } = await supabase.from('operations').update({
-        montant_paye: newMontantPaye,
-        reste_a_payer: newResteAPayer,
-        statut_paiement: isSolde ? 'Payé' : 'Partiel',
-      }).eq('num_op', activeDebt.numOp);
-      if (updateErr) throw updateErr;
+      if (!isPending) {
+        const { error: updateErr } = await supabase.from('operations').update({
+          montant_paye: newMontantPaye,
+          reste_a_payer: newResteAPayer,
+          statut_paiement: isSolde ? 'Payé' : 'Partiel',
+        }).eq('num_op', activeDebt.numOp);
+        if (updateErr) throw updateErr;
+      }
 
       Promise.resolve().then(() => {
         generateDebtPaymentPDF({
@@ -391,6 +509,7 @@ export default function Debts({ profile }: DebtsProps) {
           refPaiement: payRef.trim() || undefined,
           cashierName: profile.username,
           notes: payNotes.trim() || undefined,
+          pendingValidation: isPending,
         });
       });
 
@@ -399,7 +518,12 @@ export default function Debts({ profile }: DebtsProps) {
       setSupplierLoaded(false); // invalidate supplier credits cache
       setShowPaymentModal(false);
       fetchDebts();
-      if (isSolde) alert(`✅ La créance ${activeDebt.operationNumber} est intégralement soldée !`);
+      if (isPending) {
+        fetchPendingPayments();
+        alert(`⏳ Paiement de ${amount.toFixed(2)} DH enregistré — EN ATTENTE de validation par l'administrateur.\nUn reçu provisoire a été généré.`);
+      } else if (isSolde) {
+        alert(`✅ La créance ${activeDebt.operationNumber} est intégralement soldée !`);
+      }
     } catch (err) {
       alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     } finally {
@@ -513,10 +637,12 @@ export default function Debts({ profile }: DebtsProps) {
   // Partagé entre les cartes DebtRow (clients) et la table Crédits Fournisseurs.
   const PaymentHistoryPanel: React.FC<{ debt: DebtOp }> = ({ debt }) => {
     const isSupplier = debt.kind === 'fournisseur';
-    // Paiement initial (acompte à la création) = montant payé cumulé − somme des paiements partiels enregistrés.
-    // Chaque paiement de debt_payments incrémente operations.montant_paye, donc la différence
-    // reconstitue exactement le montant_paye initial de l'opération.
-    const realPayments = paymentHistories[debt.numOp] || [];
+    const allPayments = paymentHistories[debt.numOp] || [];
+    // Paiement initial (acompte à la création) = montant payé cumulé − somme des paiements VALIDÉS.
+    // Seuls les paiements 'valide' incrémentent operations.montant_paye (les paiements
+    // caissier en attente / rejetés n'y figurent pas) — la différence reconstitue
+    // exactement le montant_paye initial de l'opération.
+    const realPayments = allPayments.filter((p) => (p.statut ?? 'valide') === 'valide');
     const sumRealPayments = realPayments.reduce((s, p) => s + p.montant, 0);
     const initialPayment = Math.max(0, debt.montantPaye - sumRealPayments);
     const hasInitialPayment = initialPayment > 0.01;
@@ -545,7 +671,7 @@ export default function Debts({ profile }: DebtsProps) {
             <div className="h-4 w-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
             <span className="text-xs text-slate-400 font-medium">Chargement...</span>
           </div>
-        ) : realPayments.length === 0 && !hasInitialPayment ? (
+        ) : allPayments.length === 0 && !hasInitialPayment ? (
           <p className="text-xs text-slate-400 font-medium italic py-2">Aucun paiement enregistré.</p>
         ) : (
           <div className="space-y-2">
@@ -572,36 +698,69 @@ export default function Debts({ profile }: DebtsProps) {
                 </div>
               </div>
             )}
-            {realPayments.map((p, idx) => (
-              <div key={p.id} className="flex items-center justify-between bg-white rounded-xl border border-slate-100 px-4 py-2.5">
-                <div>
-                  <p className="text-xs font-bold text-slate-700">
-                    {p.datePaiement ? new Date(p.datePaiement).toLocaleDateString('fr-FR') : '—'}
-                    {p.heurePaiement && <span className="ml-1 text-slate-400 font-normal text-[10px]">{p.heurePaiement.slice(0, 5)}</span>}
-                    <span className="ml-2 text-[10px] font-bold text-slate-500">{p.conditionPaiement}</span>
-                    {p.refPaiement && <span className="ml-1 text-[10px] text-slate-400">#{p.refPaiement}</span>}
-                  </p>
-                  {p.agentName && p.agentName !== '—' && <p className="text-[10px] text-slate-400 font-medium">par {p.agentName}</p>}
-                  {p.notes && <p className="text-[10px] text-slate-400 italic">{p.notes}</p>}
+            {allPayments.map((p) => {
+              const st = p.statut ?? 'valide';
+              return (
+                <div key={p.id} className={cn(
+                  'flex items-center justify-between rounded-xl border px-4 py-2.5',
+                  st === 'en_attente' ? 'bg-amber-50/60 border-amber-200' :
+                  st === 'annule' ? 'bg-slate-50 border-slate-200 opacity-60' :
+                  'bg-white border-slate-100'
+                )}>
+                  <div>
+                    <p className="text-xs font-bold text-slate-700">
+                      {p.datePaiement ? new Date(p.datePaiement).toLocaleDateString('fr-FR') : '—'}
+                      {p.heurePaiement && <span className="ml-1 text-slate-400 font-normal text-[10px]">{p.heurePaiement.slice(0, 5)}</span>}
+                      <span className="ml-2 text-[10px] font-bold text-slate-500">{p.conditionPaiement}</span>
+                      {p.refPaiement && <span className="ml-1 text-[10px] text-slate-400">#{p.refPaiement}</span>}
+                      {st === 'en_attente' && (
+                        <span className="ml-2 text-[9px] font-black text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-md uppercase tracking-wider">En attente</span>
+                      )}
+                      {st === 'annule' && (
+                        <span className="ml-2 text-[9px] font-black text-rose-700 bg-rose-100 px-1.5 py-0.5 rounded-md uppercase tracking-wider">Annulé</span>
+                      )}
+                    </p>
+                    {p.agentName && p.agentName !== '—' && <p className="text-[10px] text-slate-400 font-medium">par {p.agentName}</p>}
+                    {p.notes && <p className="text-[10px] text-slate-400 italic">{p.notes}</p>}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <p className={cn(
+                      'font-black text-sm',
+                      st === 'valide' ? 'text-emerald-600' : st === 'en_attente' ? 'text-amber-600' : 'text-slate-400 line-through'
+                    )}>
+                      +{p.montant.toFixed(2)} DH
+                    </p>
+                    {st === 'valide' && (
+                      <button
+                        onClick={() => {
+                          // Total déjà réglé = acompte initial + tous les paiements VALIDÉS strictement antérieurs
+                          // (realPayments est trié par created_at puis id → chronologie exacte)
+                          const validIdx = realPayments.findIndex((v) => v.id === p.id);
+                          const prevPaid = initialPayment + realPayments.slice(0, Math.max(0, validIdx)).reduce((s, px) => s + px.montant, 0);
+                          const afterBalance = Math.max(0, debt.totalDh - prevPaid - p.montant);
+                          generateDebtPaymentPDF({ operationNumber: debt.operationNumber, clientName: debt.clientName || 'Comptoir', counterpartyLabel: isSupplier ? 'Fournisseur' : 'Client', totalOriginal: debt.totalDh, montantCePaiement: p.montant, totalDejaPaye: prevPaid, resteAPayerApres: afterBalance, datePaiement: p.datePaiement, heurePaiement: p.heurePaiement, conditionPaiement: p.conditionPaiement, refPaiement: p.refPaiement, cashierName: p.agentName, notes: p.notes });
+                        }}
+                        className="p-1.5 text-slate-300 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                        title="Réimprimer le reçu"
+                      >
+                        <Printer className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {st === 'en_attente' && (
+                      <button
+                        onClick={() => {
+                          generateDebtPaymentPDF({ operationNumber: debt.operationNumber, clientName: debt.clientName || 'Comptoir', counterpartyLabel: isSupplier ? 'Fournisseur' : 'Client', totalOriginal: debt.totalDh, montantCePaiement: p.montant, totalDejaPaye: debt.montantPaye, resteAPayerApres: Math.max(0, debt.resteAPayer - p.montant), datePaiement: p.datePaiement, heurePaiement: p.heurePaiement, conditionPaiement: p.conditionPaiement, refPaiement: p.refPaiement, cashierName: p.agentName, notes: p.notes, pendingValidation: true });
+                        }}
+                        className="p-1.5 text-amber-400 hover:text-amber-600 hover:bg-amber-100 rounded-lg transition-all"
+                        title="Réimprimer le reçu provisoire"
+                      >
+                        <Printer className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <p className="font-black text-emerald-600 text-sm">+{p.montant.toFixed(2)} DH</p>
-                  <button
-                    onClick={() => {
-                      // Total déjà réglé = acompte initial + tous les paiements strictement antérieurs
-                      // (realPayments est trié par created_at puis id → slice(0, idx) = chronologie exacte)
-                      const prevPaid = initialPayment + realPayments.slice(0, idx).reduce((s, px) => s + px.montant, 0);
-                      const afterBalance = Math.max(0, debt.totalDh - prevPaid - p.montant);
-                      generateDebtPaymentPDF({ operationNumber: debt.operationNumber, clientName: debt.clientName || 'Comptoir', counterpartyLabel: isSupplier ? 'Fournisseur' : 'Client', totalOriginal: debt.totalDh, montantCePaiement: p.montant, totalDejaPaye: prevPaid, resteAPayerApres: afterBalance, datePaiement: p.datePaiement, heurePaiement: p.heurePaiement, conditionPaiement: p.conditionPaiement, refPaiement: p.refPaiement, cashierName: p.agentName, notes: p.notes });
-                    }}
-                    className="p-1.5 text-slate-300 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
-                    title="Réimprimer le reçu"
-                  >
-                    <Printer className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -712,7 +871,8 @@ export default function Debts({ profile }: DebtsProps) {
               </a>
             ) : null;
           })()}
-          {onPay && canManage && debt.resteAPayer > 0.01 && (
+          {/* Paiement ouvert à TOUS les rôles : caissier → en attente de validation admin */}
+          {onPay && debt.resteAPayer > 0.01 && (
             <button onClick={() => onPay(debt)} className="flex items-center gap-1.5 px-3 py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl transition-all shadow-sm shadow-emerald-500/20">
               <Plus className="h-3.5 w-3.5" /> Paiement
             </button>
@@ -762,6 +922,58 @@ export default function Debts({ profile }: DebtsProps) {
             <p className="text-sm text-slate-500 font-medium">{debtOps.length} créance(s) active(s)</p>
           </div>
         </div>
+
+        {/* ── File d'attente admin : paiements caissier à valider ── */}
+        {isAdmin && pendingPayments.length > 0 && (
+          <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl shadow-sm overflow-hidden">
+            <div className="px-5 py-3 flex items-center gap-3 border-b border-amber-200/70 bg-amber-100/50">
+              <Clock className="h-5 w-5 text-amber-600 shrink-0" />
+              <p className="text-sm font-black text-amber-800">
+                {pendingPayments.length} paiement(s) caissier en attente de votre validation
+              </p>
+              <span className="ml-auto text-xs font-black text-amber-700">
+                {pendingPayments.reduce((s, p) => s + p.montant, 0).toFixed(2)} DH
+              </span>
+            </div>
+            <div className="divide-y divide-amber-100">
+              {pendingPayments.map((p) => (
+                <div key={p.id} className="px-5 py-3 flex items-center justify-between gap-3 flex-wrap">
+                  <div className="min-w-0">
+                    <p className="text-sm font-black text-slate-800">
+                      {p.counterpartyName}
+                      <span className="ml-2 text-[10px] font-mono font-bold text-slate-400 bg-white px-1.5 py-0.5 rounded-md border border-amber-100">{p.opNumber}</span>
+                    </p>
+                    <p className="text-xs text-slate-500 font-medium">
+                      {p.datePaiement ? new Date(p.datePaiement).toLocaleDateString('fr-FR') : '—'}
+                      {p.heurePaiement && ` ${String(p.heurePaiement).slice(0, 5)}`}
+                      {' · '}{p.conditionPaiement}
+                      {p.refPaiement && ` #${p.refPaiement}`}
+                      {' · par '}{p.agentName}
+                      {p.notes && <span className="italic"> — {p.notes}</span>}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <p className="font-black text-amber-700 text-base">{p.montant.toFixed(2)} DH</p>
+                    <button
+                      onClick={() => handleValidatePendingPayment(p)}
+                      className="flex items-center gap-1.5 px-3 py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl transition-all shadow-sm shadow-emerald-500/20"
+                      title="Valider — le montant sera déduit de la créance"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" /> Valider
+                    </button>
+                    <button
+                      onClick={() => handleRejectPendingPayment(p)}
+                      className="flex items-center gap-1.5 px-3 py-2 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 font-bold text-xs rounded-xl transition-all"
+                      title="Rejeter — la créance reste inchangée"
+                    >
+                      <X className="h-3.5 w-3.5" /> Rejeter
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="flex bg-slate-100 p-1 w-fit rounded-xl gap-1">
@@ -1380,6 +1592,17 @@ export default function Debts({ profile }: DebtsProps) {
                   <X className="h-5 w-5" />
                 </button>
               </div>
+
+              {/* Caissier : information workflow de validation */}
+              {!canManage && (
+                <div className="mx-6 mt-4 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                  <Clock className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+                  <p className="text-xs font-bold text-amber-700">
+                    Votre encaissement sera soumis à la validation de l'administrateur avant d'être
+                    déduit de la créance. Un reçu provisoire sera imprimé.
+                  </p>
+                </div>
+              )}
 
               <div className="mx-6 mt-4 grid grid-cols-3 gap-3 bg-slate-50 rounded-2xl p-4 border border-slate-100">
                 <div className="text-center">

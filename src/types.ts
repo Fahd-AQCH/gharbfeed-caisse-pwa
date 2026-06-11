@@ -130,6 +130,7 @@ export interface DebtPayment {
   agentName?: string;
   notes?: string;
   createdAt?: string;
+  statut?: 'valide' | 'en_attente' | 'annule'; // workflow caissier → validation admin
 }
 
 export interface PriceHistoryEntry {

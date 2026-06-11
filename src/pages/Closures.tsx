@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { UserProfile } from '../types';
 import { supabase } from '../supabase';
 import { generateZReportPDF } from '../utils/zReportPdfGenerator';
@@ -83,6 +84,24 @@ export default function Closures({ profile }: ClosuresProps) {
 
   const lastClosure: ClosureRow | null = closures.length > 0 ? closures[0] : null;
 
+  // ── DOUBLE BLOQUEUR DE CLÔTURE (règle d'or comptable) ───────────────────────
+  // Un paiement en attente = espèces potentiellement DANS le tiroir non comptabilisées.
+  // Un achat en attente = espèces potentiellement SORTIES non comptabilisées.
+  // Tant que l'un des deux existe, l'arrêté de caisse est strictement interdit.
+  const [blockers, setBlockers] = useState<{ payments: number; purchases: number }>({ payments: 0, purchases: 0 });
+
+  const fetchBlockers = useCallback(async (): Promise<{ payments: number; purchases: number }> => {
+    const [pendingPays, pendingAchats] = await Promise.all([
+      supabase.from('debt_payments').select('id', { count: 'exact', head: true }).eq('statut', 'en_attente'),
+      supabase.from('operations').select('num_op', { count: 'exact', head: true }).eq('type_op', 'achat').eq('statut', 'en_attente'),
+    ]);
+    return { payments: pendingPays.count || 0, purchases: pendingAchats.count || 0 };
+  }, []);
+
+  useEffect(() => { fetchBlockers().then(setBlockers).catch(() => {}); }, [fetchBlockers]);
+
+  const hasBlockers = blockers.payments > 0 || blockers.purchases > 0;
+
   // ── Chargement de l'historique des clôtures ─────────────────────────────────
   const fetchClosures = useCallback(async () => {
     setLoading(true);
@@ -135,6 +154,9 @@ export default function Closures({ profile }: ClosuresProps) {
   const computeBreakdown = useCallback(async () => {
     setComputing(true);
     try {
+      // Rafraîchit les bloqueurs en même temps que le calcul
+      fetchBlockers().then(setBlockers).catch(() => {});
+
       const now = new Date();
       const finDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(now);
       const finHeure = now.toTimeString().split(' ')[0];
@@ -175,6 +197,7 @@ export default function Closures({ profile }: ClosuresProps) {
         const { data: allPays } = await supabase
           .from('debt_payments')
           .select('operation_id, montant')
+          .eq('statut', 'valide') // seuls les paiements validés sont dans montant_paye
           .in('operation_id', especeVAIds);
         (allPays || []).forEach((p: any) => {
           paymentsSumByOp[p.operation_id] = (paymentsSumByOp[p.operation_id] || 0) + parseFloat(p.montant || 0);
@@ -189,6 +212,7 @@ export default function Closures({ profile }: ClosuresProps) {
         .from('debt_payments')
         .select('operation_id, montant, date_paiement, heure_paiement, condition_paiement')
         .eq('condition_paiement', 'Espèce')
+        .eq('statut', 'valide') // les en attente / annulés ne sont pas des espèces comptabilisées
         .gte('date_paiement', debutDate)
         .lte('date_paiement', finDate);
       if (paysErr) throw paysErr;
@@ -275,6 +299,20 @@ export default function Closures({ profile }: ClosuresProps) {
   // ── Validation de la clôture ────────────────────────────────────────────────
   const handleValidate = async () => {
     if (!isAdmin || !breakdown || !profile?.id) return;
+
+    // ── BLOQUEUR STRICT : re-vérification FRAÎCHE au moment de valider
+    //    (un caissier peut avoir enregistré un paiement pendant que cette page était ouverte)
+    const fresh = await fetchBlockers();
+    setBlockers(fresh);
+    if (fresh.payments > 0 || fresh.purchases > 0) {
+      alert(
+        `🚫 Impossible de clôturer :\n\n` +
+        `Vous avez ${fresh.payments} paiement(s) de dette en attente et ${fresh.purchases} achat(s) en attente.\n` +
+        `Veuillez les valider ou les annuler avant d'arrêter la caisse.`
+      );
+      return;
+    }
+
     if (!hasReel || soldeReelNum < 0) { alert('Saisissez le solde réel compté en caisse.'); return; }
     if (!hasFondsNext) { alert("Saisissez le fonds de caisse pour la prochaine ouverture."); return; }
     if (fondsNextNum > soldeReelNum + 0.01) {
@@ -455,6 +493,41 @@ export default function Closures({ profile }: ClosuresProps) {
           </div>
         </div>
 
+        {/* ── DOUBLE BLOQUEUR : tout doit être résolu avant l'arrêté ── */}
+        {hasBlockers && (
+          <div className="bg-rose-50 border-2 border-rose-300 rounded-2xl p-5 shadow-sm">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-6 w-6 text-rose-600 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-base font-black text-rose-800">Impossible de clôturer la caisse</p>
+                <p className="text-sm font-medium text-rose-700 mt-1">
+                  Vous avez <strong>{blockers.payments} paiement(s) de dette en attente</strong> et{' '}
+                  <strong>{blockers.purchases} achat(s) en attente</strong>.
+                  Veuillez les valider ou les annuler avant d'arrêter la caisse.
+                </p>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  {blockers.payments > 0 && (
+                    <Link
+                      to="/debts"
+                      className="flex items-center gap-1.5 px-3 py-2 bg-white border border-rose-200 text-rose-700 font-bold text-xs rounded-xl hover:bg-rose-100 transition-all"
+                    >
+                      → Traiter les {blockers.payments} paiement(s) (Gestion des Dettes)
+                    </Link>
+                  )}
+                  {blockers.purchases > 0 && (
+                    <Link
+                      to="/history"
+                      className="flex items-center gap-1.5 px-3 py-2 bg-white border border-rose-200 text-rose-700 font-bold text-xs rounded-xl hover:bg-rose-100 transition-all"
+                    >
+                      → Traiter les {blockers.purchases} achat(s) (Historique)
+                    </Link>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {computing || (loading && !breakdown) ? (
           <div className="flex items-center justify-center py-16 bg-white rounded-2xl border border-slate-200">
             <div className="h-8 w-8 border-4 border-rose-500 border-t-transparent rounded-full animate-spin" />
@@ -610,17 +683,22 @@ export default function Closures({ profile }: ClosuresProps) {
               <div className="p-5 border-t border-slate-100 bg-slate-50">
                 <button
                   onClick={handleValidate}
-                  disabled={validating || !hasReel || !hasFondsNext}
+                  disabled={validating || !hasReel || !hasFondsNext || hasBlockers}
                   className="w-full py-3.5 bg-rose-600 hover:bg-rose-700 text-white font-black rounded-2xl shadow-lg shadow-rose-500/20 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:shadow-none"
+                  title={hasBlockers ? `${blockers.payments} paiement(s) et ${blockers.purchases} achat(s) en attente — résolvez-les d'abord` : undefined}
                 >
                   {validating ? (
                     <span className="animate-pulse">CLÔTURE EN COURS...</span>
+                  ) : hasBlockers ? (
+                    <><AlertTriangle className="h-4 w-4" /> CLÔTURE BLOQUÉE — ÉLÉMENTS EN ATTENTE</>
                   ) : (
                     <><Lock className="h-4 w-4" /> VALIDER LA CLÔTURE &amp; IMPRIMER LE TICKET Z</>
                   )}
                 </button>
                 <p className="text-[10px] text-slate-400 font-medium text-center mt-2">
-                  Verrouille la période pour les caissiers et trésoriers — l'admin garde la main.
+                  {hasBlockers
+                    ? 'Validez ou annulez les paiements et achats en attente avant de compter la caisse.'
+                    : 'Verrouille la période pour les caissiers et trésoriers — l\'admin garde la main.'}
                 </p>
               </div>
             </div>

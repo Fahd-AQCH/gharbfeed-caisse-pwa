@@ -16,12 +16,14 @@ export interface DebtPaymentReceiptData {
   refPaiement?: string;
   cashierName?: string;
   notes?: string;
-  isInitialPayment?: boolean; // acompte versé à la création de l'opération (pas dans debt_payments)
+  isInitialPayment?: boolean;  // acompte versé à la création de l'opération (pas dans debt_payments)
+  pendingValidation?: boolean; // paiement caissier en attente de validation admin → reçu PROVISOIRE
 }
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
 const C = {
   emerald:  [16,  185, 129] as [number, number, number],
+  amber:    [245, 158,  11] as [number, number, number],
   slate900: [15,   23,  42] as [number, number, number],
   slate700: [51,   65,  85] as [number, number, number],
   slate400: [148, 163, 184] as [number, number, number],
@@ -63,13 +65,15 @@ export function generateDebtPaymentPDF(data: DebtPaymentReceiptData): void {
   y += 27;
 
   // ── TITLE BANNER ────────────────────────────────────────────────────────────
-  doc.setFillColor(...C.emerald);
+  doc.setFillColor(...(data.pendingValidation ? C.amber : C.emerald));
   doc.roundedRect(margin, y, contentW, 10, 2, 2, 'F');
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.5);
   doc.setTextColor(...C.white);
   doc.text(
-    data.isInitialPayment ? "REÇU D'ACOMPTE INITIAL — À LA CRÉATION" : 'REÇU DE RÈGLEMENT DE CRÉANCE',
+    data.pendingValidation
+      ? 'REÇU PROVISOIRE — EN ATTENTE DE VALIDATION'
+      : data.isInitialPayment ? "REÇU D'ACOMPTE INITIAL — À LA CRÉATION" : 'REÇU DE RÈGLEMENT DE CRÉANCE',
     pageW / 2, y + 6.5, { align: 'center' }
   );
   y += 14;
@@ -203,5 +207,5 @@ export function generateDebtPaymentPDF(data: DebtPaymentReceiptData): void {
   doc.text('GharbFeed v1.2 · Gestion des Créances', pageW / 2, footerY, { align: 'center' });
   doc.text('Merci !', pageW - margin, footerY, { align: 'right' });
 
-  doc.save(`recu_${data.operationNumber}_${data.datePaiement}${data.isInitialPayment ? '_initial' : ''}.pdf`);
+  doc.save(`recu_${data.operationNumber}_${data.datePaiement}${data.isInitialPayment ? '_initial' : ''}${data.pendingValidation ? '_provisoire' : ''}.pdf`);
 }

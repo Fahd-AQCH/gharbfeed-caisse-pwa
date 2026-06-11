@@ -251,6 +251,33 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
     if (operation.isModified) fetchVersionHistory();
   }, [operation.isModified, fetchVersionHistory]);
 
+  // ── Annulation Achat Admin ────────────────────────────────────────────────
+  // L'achat annulé ne touche NI le stock, NI les crédits fournisseurs, NI le
+  // Ticket Z (tout filtre statut='valide') — il reste en historique pour audit.
+  const [cancelling, setCancelling] = useState(false);
+  const handleCancelPurchase = async () => {
+    if (!isAdmin || !isPendingPurchase) return;
+    if (!window.confirm(
+      `Annuler définitivement l'achat ${operation.operationNumber} ?\n\n` +
+      `Aucun stock ne sera mis à jour, aucun crédit fournisseur ne sera créé.\n` +
+      `L'opération restera visible dans l'historique avec le statut ANNULÉ.`
+    )) return;
+    setCancelling(true);
+    try {
+      const { error } = await supabase
+        .from('operations')
+        .update({ statut: 'annule', observ: 'Achat annulé par admin' })
+        .eq('num_op', parseInt(operation.id));
+      if (error) throw error;
+      onUpdate();
+      onClose();
+    } catch (err) {
+      alert("Erreur lors de l'annulation : " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   // ── Validation Achat Admin ────────────────────────────────────────────────
   const supplierPaidNum = parseFloat(supplierPaid || '0') || 0;
   const supplierReste = Math.max(0, finalTotal - supplierPaidNum);
@@ -1005,20 +1032,36 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
         {!loading && (
           <div className="p-6 border-t border-slate-200 bg-slate-50 shrink-0 flex justify-end gap-3">
             {isAdmin && isPendingPurchase && (
-              <button
-                onClick={handleValidatePurchase}
-                disabled={validating}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-8 rounded-2xl flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all disabled:opacity-50"
-              >
-                {validating ? (
-                  <span className="animate-pulse">VALIDATION EN COURS...</span>
-                ) : (
-                  <>
-                    <ShieldCheck className="h-5 w-5" />
-                    VALIDER L'ACHAT &amp; METTRE À JOUR STOCK
-                  </>
-                )}
-              </button>
+              <>
+                <button
+                  onClick={handleCancelPurchase}
+                  disabled={validating || cancelling}
+                  className="bg-white border-2 border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300 font-black py-3 px-6 rounded-2xl flex items-center gap-2 transition-all disabled:opacity-50"
+                >
+                  {cancelling ? (
+                    <span className="animate-pulse">ANNULATION...</span>
+                  ) : (
+                    <>
+                      <X className="h-5 w-5" />
+                      ANNULER ACHAT
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={handleValidatePurchase}
+                  disabled={validating || cancelling}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-8 rounded-2xl flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all disabled:opacity-50"
+                >
+                  {validating ? (
+                    <span className="animate-pulse">VALIDATION EN COURS...</span>
+                  ) : (
+                    <>
+                      <ShieldCheck className="h-5 w-5" />
+                      VALIDER L'ACHAT &amp; METTRE À JOUR STOCK
+                    </>
+                  )}
+                </button>
+              </>
             )}
           </div>
         )}
