@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import logo from '@/logo.png';
 import {
@@ -13,10 +13,13 @@ import {
   CreditCard,
   Receipt,
   Archive,
+  RefreshCw,
 } from 'lucide-react';
 import { UserProfile } from '../../types';
 import { cn } from '../../lib/utils';
 import { supabase } from '../../supabase';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db } from '../../lib/db';
 
 interface SidebarProps {
   profile: UserProfile | null;
@@ -32,11 +35,27 @@ const menuItems = [
   { path: '/expenses', label: 'Charges & Dépenses', icon: Receipt, roles: ['admin', 'tresorier'] },
   { path: '/closures', label: 'Clôture de Caisse', icon: Archive, roles: ['admin'] },
   { path: '/history', label: 'Historique', icon: History, roles: ['admin', 'tresorier', 'supervisor', 'cashier', 'stock_manager'] },
+  { path: '/sync', label: 'Synchronisation', icon: RefreshCw, roles: ['admin', 'tresorier', 'supervisor', 'cashier', 'stock_manager'] },
   { path: '/admin', label: 'Administration', icon: Settings, roles: ['admin'] },
 ];
 
 export default function Sidebar({ profile }: SidebarProps) {
   const navigate = useNavigate();
+
+  // État réseau RÉEL (B1 — l'ancien panneau affichait « Connecté » en dur)
+  const [online, setOnline] = useState(() => navigator.onLine);
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
+  }, []);
+
+  // File de synchro locale (badge live sur l'entrée Synchronisation)
+  const queuePending = useLiveQuery(() => db.sync_queue.where('status').anyOf('pending', 'processing').count(), []) ?? 0;
+  const queueFailed = useLiveQuery(() => db.sync_queue.where('status').equals('failed').count(), []) ?? 0;
+  const queueTotal = queuePending + queueFailed;
 
   const filteredMenu = menuItems.filter(
     (item) => !profile || item.roles.includes(profile.roleId)
@@ -99,20 +118,40 @@ export default function Sidebar({ profile }: SidebarProps) {
             >
               <item.icon className="w-5 h-5" />
               <span className="font-medium">{item.label}</span>
+              {item.path === '/sync' && queueTotal > 0 && (
+                <span className={cn(
+                  'ml-auto text-[10px] font-black rounded-full min-w-5 h-5 px-1.5 flex items-center justify-center',
+                  queueFailed > 0 ? 'bg-rose-500 text-white' : 'bg-amber-500 text-white'
+                )}>
+                  {queueTotal > 99 ? '99+' : queueTotal}
+                </span>
+              )}
             </NavLink>
           ))}
         </div>
       </nav>
 
-      <div className="p-4 bg-slate-800/50 m-4 rounded-xl border border-slate-700">
+      {/* Statut réseau RÉEL — cliquable vers le centre de synchronisation */}
+      <button
+        onClick={() => navigate('/sync')}
+        className="p-4 bg-slate-800/50 m-4 rounded-xl border border-slate-700 text-left hover:border-slate-500 transition-colors"
+        title="Ouvrir le centre de synchronisation"
+      >
         <div className="text-xs text-slate-400 uppercase tracking-widest font-bold mb-2">
           Statut Serveur
         </div>
         <div className="flex items-center space-x-2">
-          <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
-          <span className="text-sm text-slate-300">Connecté au Cloud</span>
+          <div className={cn('w-2 h-2 rounded-full', online ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse')}></div>
+          <span className="text-sm text-slate-300">{online ? 'Connecté au Cloud' : 'Hors ligne'}</span>
         </div>
-      </div>
+        {queueTotal > 0 && (
+          <p className={cn('text-[11px] font-bold mt-1.5', queueFailed > 0 ? 'text-rose-400' : 'text-amber-400')}>
+            {queuePending > 0 && `${queuePending} en attente`}
+            {queuePending > 0 && queueFailed > 0 && ' · '}
+            {queueFailed > 0 && `${queueFailed} en échec`}
+          </p>
+        )}
+      </button>
 
       <div className="p-4 mt-auto border-t border-slate-800 shrink-0">
         <button

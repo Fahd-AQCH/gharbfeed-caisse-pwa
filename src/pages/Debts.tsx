@@ -30,6 +30,7 @@ import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateDebtPaymentPDF } from '../utils/debtPdfGenerator';
 import { fetchLatestClosure, isBeforeLock, ClosureLock } from '../lib/closureLock';
+import { nowMaroc } from '../lib/serverTime';
 
 interface DebtsProps {
   profile: UserProfile | null;
@@ -149,32 +150,16 @@ export default function Debts({ profile }: DebtsProps) {
 
   useEffect(() => { fetchPendingPayments(); }, [fetchPendingPayments]);
 
-  // Validation admin : bascule le paiement en 'valide' ET reporte le montant
-  // sur l'opération (relecture fraîche = garde anti-dépassement du reste dû)
+  // Validation admin via RPC ATOMIQUE : verrou ligne + garde « montant ≤ reste »
+  // + contrôle « déjà traité » côté serveur — deux admins simultanés ne peuvent
+  // plus valider deux fois le même paiement.
   const handleValidatePendingPayment = async (p: DebtPayment & { opNumber: string; counterpartyName: string }) => {
     try {
-      const { data: op, error: opErr } = await supabase
-        .from('operations')
-        .select('montant_paye, reste_a_payer')
-        .eq('num_op', p.operationId)
-        .single();
-      if (opErr) throw opErr;
-      const reste = parseFloat(op.reste_a_payer || 0);
-      if (p.montant > reste + 0.01) {
-        alert(`Validation impossible : le paiement (${p.montant.toFixed(2)} DH) dépasse le reste dû actuel (${reste.toFixed(2)} DH) de ${p.opNumber}.\nRejetez ce paiement ou corrigez la créance.`);
-        return;
-      }
-      const newPaye = parseFloat(op.montant_paye || 0) + p.montant;
-      const newReste = Math.max(0, reste - p.montant);
-
-      const { error: payErr } = await supabase.from('debt_payments').update({ statut: 'valide' }).eq('id', p.id);
-      if (payErr) throw payErr;
-      const { error: updErr } = await supabase.from('operations').update({
-        montant_paye: newPaye,
-        reste_a_payer: newReste,
-        statut_paiement: newReste <= 0.01 ? 'Payé' : 'Partiel',
-      }).eq('num_op', p.operationId);
-      if (updErr) throw updErr;
+      const { error } = await supabase.rpc('decide_debt_payment', {
+        p_payment_id: p.id,
+        p_decision: 'valide',
+      });
+      if (error) throw error;
 
       setPaymentHistories(prev => { const n = { ...prev }; delete n[p.operationId]; return n; });
       setHistoryLoaded(false);
@@ -182,19 +167,24 @@ export default function Debts({ profile }: DebtsProps) {
       fetchDebts();
     } catch (err) {
       alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      fetchPendingPayments(); // resynchronise la file (cas « déjà traité »)
     }
   };
 
-  // Rejet admin : le paiement passe en 'annule' (audit) — la créance reste intacte
+  // Rejet admin via la même RPC : passage en 'annule' (audit), créance intacte
   const handleRejectPendingPayment = async (p: DebtPayment & { opNumber: string; counterpartyName: string }) => {
     if (!window.confirm(`Rejeter le paiement de ${p.montant.toFixed(2)} DH (${p.opNumber} · ${p.counterpartyName}) ?\nIl sera marqué ANNULÉ et n'affectera pas la créance.`)) return;
     try {
-      const { error } = await supabase.from('debt_payments').update({ statut: 'annule' }).eq('id', p.id);
+      const { error } = await supabase.rpc('decide_debt_payment', {
+        p_payment_id: p.id,
+        p_decision: 'annule',
+      });
       if (error) throw error;
       setPaymentHistories(prev => { const n = { ...prev }; delete n[p.operationId]; return n; });
       fetchPendingPayments();
     } catch (err) {
       alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      fetchPendingPayments();
     }
   };
 
@@ -464,35 +454,33 @@ export default function Debts({ profile }: DebtsProps) {
     }
     setPayLoading(true);
     try {
-      const timeStr = new Date().toTimeString().split(' ')[0];
-      const newMontantPaye = activeDebt.montantPaye + amount;
-      const newResteAPayer = Math.max(0, activeDebt.resteAPayer - amount);
-      const isSolde = newResteAPayer <= 0.01;
+      const { date: payDate, heure: timeStr } = nowMaroc();
       // Caissier → paiement EN ATTENTE : l'opération n'est PAS touchée tant que
       // l'admin n'a pas validé (montant_paye/reste_a_payer figés, reçu provisoire)
       const isPending = !canManage;
 
-      const { error: payErr } = await supabase.from('debt_payments').insert({
-        operation_id: activeDebt.numOp,
-        montant: amount,
-        date_paiement: todayStr,
-        heure_paiement: timeStr,
-        condition_paiement: payCondition,
-        ref_paiement: payRef.trim() || null,
-        utilisateur_id: profile.id,
-        notes: payNotes.trim() || null,
-        statut: isPending ? 'en_attente' : 'valide',
+      // RPC ATOMIQUE (Sprint 1) : insertion du paiement + report sur l'opération
+      // dans la MÊME transaction, avec verrou ligne et garde « montant ≤ reste »
+      // côté serveur — deux encaissements simultanés ne se perdent plus.
+      const { data: rpcData, error: payErr } = await supabase.rpc('record_debt_payment', {
+        p_operation_id: activeDebt.numOp,
+        p_montant: amount,
+        p_date_paiement: payDate,
+        p_heure_paiement: timeStr,
+        p_condition_paiement: payCondition,
+        p_ref_paiement: payRef.trim() || null,
+        p_utilisateur_id: profile.id,
+        p_notes: payNotes.trim() || null,
+        p_statut: isPending ? 'en_attente' : 'valide',
       });
       if (payErr) throw payErr;
 
-      if (!isPending) {
-        const { error: updateErr } = await supabase.from('operations').update({
-          montant_paye: newMontantPaye,
-          reste_a_payer: newResteAPayer,
-          statut_paiement: isSolde ? 'Payé' : 'Partiel',
-        }).eq('num_op', activeDebt.numOp);
-        if (updateErr) throw updateErr;
-      }
+      // Valeurs POST-transaction renvoyées par le serveur (vérité absolue)
+      const serverReste = (rpcData as any)?.reste_a_payer;
+      const newResteAPayer = isPending
+        ? activeDebt.resteAPayer // l'op n'a pas bougé
+        : Math.max(0, parseFloat(String(serverReste ?? (activeDebt.resteAPayer - amount))));
+      const isSolde = !isPending && newResteAPayer <= 0.01;
 
       Promise.resolve().then(() => {
         generateDebtPaymentPDF({
@@ -502,8 +490,9 @@ export default function Debts({ profile }: DebtsProps) {
           totalOriginal: activeDebt.totalDh,
           montantCePaiement: amount,
           totalDejaPaye: activeDebt.montantPaye,
-          resteAPayerApres: newResteAPayer,
-          datePaiement: todayStr,
+          // provisoire : projection (reste − montant) ; validé : vérité serveur
+          resteAPayerApres: isPending ? Math.max(0, activeDebt.resteAPayer - amount) : newResteAPayer,
+          datePaiement: payDate,
           heurePaiement: timeStr,
           conditionPaiement: payCondition,
           refPaiement: payRef.trim() || undefined,

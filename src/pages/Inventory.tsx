@@ -6,6 +6,7 @@ import * as XLSX from 'xlsx';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
 import { pullMasterData } from '../lib/syncService';
+import { nowMaroc } from '../lib/serverTime';
 import {
   Package,
   Plus,
@@ -170,8 +171,7 @@ export default function Inventory({ profile }: InventoryProps) {
 
         // ── Log price changes to price_history ────────────────────────────────
         if (isAdmin) {
-          const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
-          const timeStr = new Date().toTimeString().split(' ')[0];
+          const { date: todayStr, heure: timeStr } = nowMaroc();
           const changes: { typePrix: string; ancienPrix: number; nouveauPrix: number }[] = [];
           if (originalPriceOnEdit !== null && Math.abs(newProduct.defaultPrice - originalPriceOnEdit) > 0.001) {
             changes.push({ typePrix: 'vente', ancienPrix: originalPriceOnEdit, nouveauPrix: newProduct.defaultPrice });

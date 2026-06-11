@@ -19,6 +19,26 @@ function isOnline(): boolean {
   return navigator.onLine;
 }
 
+// navigator.onLine peut MENTIR (portail captif, Wi-Fi sans internet réel…).
+// Cette heuristique reconnaît les échecs réseau de fetch pour basculer en file
+// locale au lieu de perdre l'opération.
+function isNetworkError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /failed to fetch|networkerror|network request failed|load failed|fetch failed|err_internet|err_network|timeout/i.test(msg);
+}
+
+// ── Horodatage de la dernière synchro réussie (affiché dans le Hub) ───────────
+
+const LAST_SYNC_KEY = 'gf_last_sync_at';
+
+export function getLastSyncAt(): string | null {
+  try { return localStorage.getItem(LAST_SYNC_KEY); } catch { return null; }
+}
+
+function markSyncSuccess(): void {
+  try { localStorage.setItem(LAST_SYNC_KEY, new Date().toISOString()); } catch { /* quota */ }
+}
+
 // ── PULL: Supabase → Dexie ────────────────────────────────────────────────────
 
 /**
@@ -247,33 +267,51 @@ export async function commitOperation(
   items: Record<string, unknown>[]
 ): Promise<{ numOp: number | string; queued: boolean }> {
 
-  if (!isOnline()) {
-    // id_op généré côté client = clé d'idempotence du push (retry sans doublon)
-    const headerWithId = { id_op: crypto.randomUUID(), ...header };
+  // id_op généré côté client SUR LES DEUX CHEMINS = clé d'idempotence du push.
+  // Même un échec online PARTIEL (header inséré, lignes en échec réseau) peut être
+  // mis en file sans risque : le push retrouvera le header par id_op et ne créera
+  // ni doublon d'opération ni double stock.
+  const headerWithId = { id_op: crypto.randomUUID(), ...header };
+
+  const enqueueFallback = async (reason: string) => {
     await enqueueOperation('operation', headerWithId, items);
     const localId = `LOC-${Date.now().toString().slice(-6)}`;
-    console.info(`[Sync] commitOperation — offline, enqueued as ${localId}`);
-    return { numOp: localId, queued: true };
+    console.warn(`[Sync] commitOperation — ${reason}, enqueued as ${localId}`);
+    return { numOp: localId, queued: true as const };
+  };
+
+  if (!isOnline()) {
+    return enqueueFallback('offline');
   }
 
-  // Online path — direct Supabase, same as the original Cashier flow
-  const { data: newOp, error: opErr } = await supabase
-    .from('operations')
-    .insert(header)
-    .select()
-    .single();
+  // Online path — direct Supabase
+  try {
+    const { data: newOp, error: opErr } = await supabase
+      .from('operations')
+      .insert(headerWithId)
+      .select()
+      .single();
 
-  if (opErr) throw new Error(opErr.message);
-  const parentId: number = (newOp as any).num_op;
+    if (opErr) throw new Error(opErr.message);
+    const parentId: number = (newOp as any).num_op;
 
-  if (items.length > 0) {
-    const itemRows = items.map((i) => ({ ...i, operation_id: parentId }));
-    const { error: itemsErr } = await supabase.from('operation_items').insert(itemRows);
-    if (itemsErr) throw new Error(itemsErr.message);
+    if (items.length > 0) {
+      const itemRows = items.map((i) => ({ ...i, operation_id: parentId }));
+      const { error: itemsErr } = await supabase.from('operation_items').insert(itemRows);
+      if (itemsErr) throw new Error(itemsErr.message);
+    }
+
+    console.info(`[Sync] commitOperation — online, num_op=${parentId}`);
+    return { numOp: parentId, queued: false };
+  } catch (err) {
+    // navigator.onLine mentait : une erreur RÉSEAU bascule l'opération en file
+    // locale au lieu de la perdre. Les vraies erreurs métier (contrainte DB,
+    // RLS…) continuent de remonter au caller.
+    if (isNetworkError(err)) {
+      return enqueueFallback('réseau KO malgré onLine');
+    }
+    throw err;
   }
-
-  console.info(`[Sync] commitOperation — online, num_op=${parentId}`);
-  return { numOp: parentId, queued: false };
 }
 
 // ── Full sync (pull + push) ───────────────────────────────────────────────────
@@ -283,8 +321,31 @@ export async function commitOperation(
  * Call on app startup and on `window.online` events.
  */
 export async function syncAll(): Promise<void> {
-  await pushPendingOperations(); // push first to avoid stale read-back
-  await pullMasterData();
+  const pushResult = await pushPendingOperations(); // push first to avoid stale read-back
+  const pullResult = await pullMasterData();
+  if (pullResult.success && pushResult.failed === 0) markSyncSuccess();
+}
+
+// ── Gestion de la file (Hub de synchronisation) ───────────────────────────────
+
+/** Relance UN élément en échec : repasse en 'pending' (compteur remis à zéro) puis push. */
+export async function retryQueueItem(id: number): Promise<void> {
+  await db.sync_queue.update(id, { status: 'pending', retryCount: 0, lastError: null });
+  await pushPendingOperations();
+}
+
+/** Relance TOUS les éléments en échec. */
+export async function retryAllFailed(): Promise<void> {
+  await db.sync_queue
+    .where('status')
+    .equals('failed')
+    .modify({ status: 'pending', retryCount: 0, lastError: null });
+  await pushPendingOperations();
+}
+
+/** Supprime définitivement un élément de la file (action destructive — confirmée en UI). */
+export async function deleteQueueItem(id: number): Promise<void> {
+  await db.sync_queue.delete(id);
 }
 
 // ── Queue helper ──────────────────────────────────────────────────────────────

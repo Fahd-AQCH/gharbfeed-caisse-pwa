@@ -5,6 +5,7 @@ import { X, CheckCircle2, Printer, ShieldCheck, Clock, RotateCcw, AlertTriangle,
 import { cn } from '../lib/utils';
 import { motion } from 'motion/react';
 import { generateTicketPDF, TicketItem, TicketOperation } from '../utils/pdfGenerator';
+import { nowMaroc } from '../lib/serverTime';
 
 interface OperationDetailsModalProps {
   operation: Operation;
@@ -264,10 +265,10 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
     )) return;
     setCancelling(true);
     try {
-      const { error } = await supabase
-        .from('operations')
-        .update({ statut: 'annule', observ: 'Achat annulé par admin' })
-        .eq('num_op', parseInt(operation.id));
+      // RPC atomique : refuse proprement si l'achat a déjà été validé/annulé ailleurs
+      const { error } = await supabase.rpc('cancel_purchase', {
+        p_num_op: parseInt(operation.id),
+      });
       if (error) throw error;
       onUpdate();
       onClose();
@@ -297,54 +298,25 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
 
     setValidating(true);
     try {
-      const { error: statusErr } = await supabase
-        .from('operations')
-        .update({
-          statut: 'valide',
-          observ: 'Achat validé par admin',
-          total_dh: finalTotal,
-          // Le paiement réellement effectué au fournisseur — corrige la colonne
-          // "Paiement" de l'historique qui affichait l'ancien montant pré-validation
-          montant_paye: supplierPaidNum,
-          reste_a_payer: supplierReste,
-          statut_paiement: supplierReste <= 0.01 ? 'Payé' : (supplierPaidNum > 0.01 ? 'Partiel' : 'Crédit'),
-          date_echeance: supplierReste > 0.01 ? supplierEcheance : null,
-        })
-        .eq('num_op', parseInt(operation.id));
-      if (statusErr) throw statusErr;
+      // RPC TRANSACTIONNELLE (Sprint 1) : en-tête + lignes + stock + paiement
+      // fournisseur appliqués en une seule transaction serveur. Verrou ligne +
+      // contrôle « déjà traité » : deux validations simultanées du même achat
+      // ne peuvent plus doubler le stock — tout passe ou rien ne passe.
+      const { error } = await supabase.rpc('validate_purchase', {
+        p_num_op: parseInt(operation.id),
+        p_total: finalTotal,
+        p_montant_paye: supplierPaidNum,
+        p_date_echeance: supplierReste > 0.01 ? supplierEcheance : null,
+        p_items: items.map((item) => ({
+          id: parseInt(item.id),
+          produit_id: item.productId,
+          quantite: item.quantity,
+          prix_unitaire: item.unitPrice,
+          total_ligne: item.lineTotal,
+        })),
+      });
+      if (error) throw error;
 
-      for (const item of items) {
-        await supabase
-          .from('operation_items')
-          .update({ quantite: item.quantity, prix_unitaire: item.unitPrice, total_ligne: item.lineTotal })
-          .eq('id', parseInt(item.id));
-      }
-
-      const stockErrors: string[] = [];
-      for (const item of items) {
-        const product = products.find((p) => p.id === item.productId);
-        if (!product) continue;
-        // RPC atomique : entrée en stock + cumul qte_achat + pdat réel — sans course
-        const { error: rpcErr } = await supabase.rpc('apply_stock_delta', {
-          p_code: product.code,
-          p_delta_stock: item.quantity,
-          p_delta_qte_achat: item.quantity,
-          p_new_pdat: item.unitPrice,
-        });
-        if (rpcErr) {
-          const msg = `${product.code}: ${rpcErr.message}`;
-          console.error('[handleValidatePurchase] stock update failed —', msg);
-          stockErrors.push(msg);
-        }
-      }
-
-      if (stockErrors.length > 0) {
-        alert(
-          `Achat validé, mais ${stockErrors.length} mise(s) à jour de stock ont échoué :\n` +
-          stockErrors.join('\n') +
-          '\nVérifiez le stock manuellement dans le catalogue.'
-        );
-      }
       onUpdate();
       onClose();
     } catch (err) {
@@ -394,8 +366,7 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
     const returnTypeOp = returnForPurchase ? 'retour_fournisseur' : 'retour_client';
 
     try {
-      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
-      const timeStr = new Date().toTimeString().split(' ')[0];
+      const { date: todayStr, heure: timeStr } = nowMaroc();
       const total = toReturn.reduce((s, i) => s + i.returnQty * i.unitPrice, 0);
 
       // 1. Créer l'opération retour

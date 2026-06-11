@@ -5,6 +5,7 @@ import { generateTicketPDF, TicketItem, TicketOperation } from '../utils/pdfGene
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
 import { commitOperation, syncAll } from '../lib/syncService';
+import { nowMaroc } from '../lib/serverTime';
 import {
   Search,
   Plus,
@@ -465,8 +466,7 @@ export default function Cashier({ profile }: CashierProps) {
     if (!toReturn.length) { alert('Sélectionnez au moins un article à retourner.'); return; }
     setCreatingReturn(true);
     try {
-      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
-      const timeStr = new Date().toTimeString().split(' ')[0];
+      const { date: todayStr, heure: timeStr } = nowMaroc();
       const total = toReturn.reduce((s, i) => s + i.returnQty * i.unitPrice, 0);
 
       const { data: returnOp, error: opErr } = await supabase
@@ -545,8 +545,7 @@ export default function Cashier({ profile }: CashierProps) {
     }
     setLoading(true);
     try {
-      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
-      const timeStr = new Date().toTimeString().split(' ')[0];
+      const { date: todayStr, heure: timeStr } = nowMaroc();
       const isVente = operationType === 'vente';
 
       // ── Build header & items payloads ─────────────────────────────────────

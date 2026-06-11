@@ -20,6 +20,7 @@ import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { fetchLatestClosure, isBeforeLock, ClosureLock } from '../lib/closureLock';
+import { nowMaroc } from '../lib/serverTime';
 
 interface ExpensesProps {
   profile: UserProfile | null;
@@ -154,8 +155,7 @@ export default function Expenses({ profile }: ExpensesProps) {
     }
     setSaving(true);
     try {
-      const now = new Date();
-      const timeStr = now.toTimeString().split(' ')[0];
+      const { heure: timeStr } = nowMaroc();
       const payload = {
         date_charge: form.date_charge,
         heure_charge: editingId ? undefined : timeStr,

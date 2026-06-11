@@ -1,6 +1,10 @@
 import React from 'react';
-import { User as UserIcon, WifiOff, Wifi } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { User as UserIcon, WifiOff, Wifi, CloudUpload } from 'lucide-react';
 import { UserProfile } from '../../types';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db } from '../../lib/db';
+import { cn } from '../../lib/utils';
 
 interface HeaderProps {
   profile: UserProfile | null;
@@ -8,6 +12,11 @@ interface HeaderProps {
 }
 
 export default function Header({ profile, isOffline = false }: HeaderProps) {
+  // U7 — compteur live de la file de synchro locale (pending + failed)
+  const queuePending = useLiveQuery(() => db.sync_queue.where('status').anyOf('pending', 'processing').count(), []) ?? 0;
+  const queueFailed = useLiveQuery(() => db.sync_queue.where('status').equals('failed').count(), []) ?? 0;
+  const queueTotal = queuePending + queueFailed;
+
   return (
     <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 shrink-0">
       <div className="flex items-center gap-4 flex-1">
@@ -26,6 +35,25 @@ export default function Header({ profile, isOffline = false }: HeaderProps) {
             <Wifi className="h-3 w-3 shrink-0" />
             <span>En ligne</span>
           </div>
+        )}
+
+        {/* ── File de synchro non vide → chip cliquable vers le Hub (U7) ── */}
+        {queueTotal > 0 && (
+          <Link
+            to="/sync"
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black border transition-all',
+              queueFailed > 0
+                ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
+                : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+            )}
+            title="Ouvrir le centre de synchronisation"
+          >
+            <CloudUpload className="h-3.5 w-3.5 shrink-0" />
+            <span>
+              {queueTotal} à synchroniser{queueFailed > 0 ? ` (${queueFailed} échec${queueFailed > 1 ? 's' : ''})` : ''}
+            </span>
+          </Link>
         )}
       </div>
 

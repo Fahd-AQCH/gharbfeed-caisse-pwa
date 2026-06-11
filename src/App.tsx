@@ -9,6 +9,7 @@ import { supabase } from './supabase';
 import { User } from '@supabase/supabase-js';
 import { UserProfile } from './types';
 import { pullMasterData, syncAll } from './lib/syncService';
+import { calibrateServerClock } from './lib/serverTime';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Cashier from './pages/Cashier';
@@ -20,6 +21,7 @@ import Fournisseurs from './pages/Fournisseurs';
 import Debts from './pages/Debts';
 import Expenses from './pages/Expenses';
 import Closures from './pages/Closures';
+import SyncHub from './pages/SyncHub';
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
 import { AnimatePresence } from 'motion/react';
@@ -34,8 +36,13 @@ export default function App() {
   const syncedRef = useRef(false); // prevent duplicate pulls on fast reconnects
 
   useEffect(() => {
+    // Calibration de l'horloge métier sur l'heure serveur (B6) — au démarrage…
+    calibrateServerClock();
+
     const handleOnline = () => {
       setIsOffline(false);
+      // …et à chaque retour réseau (l'horloge device a pu dériver entre-temps)
+      calibrateServerClock();
       // Push any queued offline operations, then refresh local DB
       syncAll().catch((err) => console.warn('[App] syncAll on reconnect:', err));
     };
@@ -232,6 +239,7 @@ export default function App() {
                   <Route path="/debts" element={<Debts profile={profile} />} />
                   <Route path="/expenses" element={<Expenses profile={profile} />} />
                   <Route path="/closures" element={<Closures profile={profile} />} />
+                  <Route path="/sync" element={<SyncHub profile={profile} />} />
                   <Route path="/admin" element={<Admin profile={profile} />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

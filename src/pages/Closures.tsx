@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { UserProfile } from '../types';
 import { supabase } from '../supabase';
 import { generateZReportPDF } from '../utils/zReportPdfGenerator';
+import { nowMaroc } from '../lib/serverTime';
 import {
   Archive,
   Calculator,
@@ -157,9 +158,8 @@ export default function Closures({ profile }: ClosuresProps) {
       // Rafraîchit les bloqueurs en même temps que le calcul
       fetchBlockers().then(setBlockers).catch(() => {});
 
-      const now = new Date();
-      const finDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(now);
-      const finHeure = now.toTimeString().split(' ')[0];
+      // Bornes du Z sur l'horloge CALIBRÉE serveur (pas celle du device)
+      const { date: finDate, heure: finHeure } = nowMaroc();
       const debutDate = lastClosure ? lastClosure.date_cloture : '2000-01-01';
       const debutHeure = lastClosure ? String(lastClosure.heure_cloture).slice(0, 8) : '00:00:00';
       const fondsOuverture = lastClosure ? lastClosure.fonds_prochaine_ouverture : 0;
