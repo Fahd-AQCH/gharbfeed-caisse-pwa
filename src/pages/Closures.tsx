@@ -4,6 +4,7 @@ import { UserProfile } from '../types';
 import { supabase } from '../supabase';
 import { generateZReportPDF } from '../utils/zReportPdfGenerator';
 import { nowMaroc } from '../lib/serverTime';
+import { toast, askConfirm } from '../lib/notify';
 import {
   Archive,
   Calculator,
@@ -278,7 +279,7 @@ export default function Closures({ profile }: ClosuresProps) {
       });
     } catch (err) {
       console.error('[Closures] compute:', err);
-      alert('Erreur lors du calcul : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur lors du calcul : ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setComputing(false);
     }
@@ -305,27 +306,31 @@ export default function Closures({ profile }: ClosuresProps) {
     const fresh = await fetchBlockers();
     setBlockers(fresh);
     if (fresh.payments > 0 || fresh.purchases > 0) {
-      alert(
-        `🚫 Impossible de clôturer :\n\n` +
+      toast.error(
+        `Impossible de clôturer :\n` +
         `Vous avez ${fresh.payments} paiement(s) de dette en attente et ${fresh.purchases} achat(s) en attente.\n` +
         `Veuillez les valider ou les annuler avant d'arrêter la caisse.`
       );
       return;
     }
 
-    if (!hasReel || soldeReelNum < 0) { alert('Saisissez le solde réel compté en caisse.'); return; }
-    if (!hasFondsNext) { alert("Saisissez le fonds de caisse pour la prochaine ouverture."); return; }
+    if (!hasReel || soldeReelNum < 0) { toast.error('Saisissez le solde réel compté en caisse.'); return; }
+    if (!hasFondsNext) { toast.error("Saisissez le fonds de caisse pour la prochaine ouverture."); return; }
     if (fondsNextNum > soldeReelNum + 0.01) {
-      alert(`Le fonds de la prochaine ouverture (${fondsNextNum.toFixed(2)} DH) ne peut pas dépasser le solde réel compté (${soldeReelNum.toFixed(2)} DH).`);
+      toast.error(`Le fonds de la prochaine ouverture (${fondsNextNum.toFixed(2)} DH) ne peut pas dépasser le solde réel compté (${soldeReelNum.toFixed(2)} DH).`);
       return;
     }
-    if (!window.confirm(
-      `Confirmer la clôture de caisse ?\n\n` +
-      `Solde théorique : ${breakdown.soldeTheorique.toFixed(2)} DH\n` +
-      `Solde réel compté : ${soldeReelNum.toFixed(2)} DH\n` +
-      `Écart : ${ecart >= 0 ? '+' : ''}${ecart.toFixed(2)} DH\n\n` +
-      `Toutes les opérations de la période seront verrouillées pour les caissiers et trésoriers.`
-    )) return;
+    const ok = await askConfirm({
+      title: 'Confirmer la clôture de caisse ?',
+      message:
+        `Solde théorique : ${breakdown.soldeTheorique.toFixed(2)} DH\n` +
+        `Solde réel compté : ${soldeReelNum.toFixed(2)} DH\n` +
+        `Écart : ${ecart >= 0 ? '+' : ''}${ecart.toFixed(2)} DH\n\n` +
+        `Toutes les opérations de la période seront verrouillées pour les caissiers et trésoriers.`,
+      confirmLabel: 'Clôturer & imprimer le Ticket Z',
+      danger: true,
+    });
+    if (!ok) return;
 
     setValidating(true);
     try {
@@ -388,9 +393,9 @@ export default function Closures({ profile }: ClosuresProps) {
       setNotes('');
       setBreakdown(null);
       await fetchClosures();
-      alert(`✅ Clôture Z-${String((inserted as any).id).padStart(4, '0')} enregistrée. Ticket Z généré.`);
+      toast.success(`Clôture Z-${String((inserted as any).id).padStart(4, '0')} enregistrée. Ticket Z généré.`);
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setValidating(false);
     }

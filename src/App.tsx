@@ -24,6 +24,7 @@ import Closures from './pages/Closures';
 import SyncHub from './pages/SyncHub';
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
+import Notifier from './components/ui/Notifier';
 import { AnimatePresence } from 'motion/react';
 
 export default function App() {
@@ -33,6 +34,8 @@ export default function App() {
 
   // ── Offline / Online network state ─────────────────────────────────────────
   const [isOffline, setIsOffline] = useState(() => !navigator.onLine);
+  // Drawer sidebar sur mobile (U4)
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const syncedRef = useRef(false); // prevent duplicate pulls on fast reconnects
 
   useEffect(() => {
@@ -202,6 +205,8 @@ export default function App() {
 
   return (
     <Router>
+      {/* Toasts + modale de confirmation globaux (remplacent alert/confirm natifs) */}
+      <Notifier />
       <AnimatePresence mode="wait">
         {!user ? (
           <Routes>
@@ -225,9 +230,10 @@ export default function App() {
           </div>
         ) : (
           <div className="flex h-screen bg-gray-50 overflow-hidden">
-            <Sidebar profile={profile} />
-            <div className="flex flex-col flex-1 overflow-hidden">
-              <Header profile={profile} isOffline={isOffline} />
+            {/* Nav mobile (U4) : sidebar en drawer, pilotée par le burger du Header */}
+            <Sidebar profile={profile} mobileOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+            <div className="flex flex-col flex-1 overflow-hidden min-w-0">
+              <Header profile={profile} isOffline={isOffline} onToggleSidebar={() => setSidebarOpen((v) => !v)} />
               <main className="flex-1 overflow-hidden bg-slate-50">
                 <Routes>
                   <Route path="/" element={<Dashboard profile={profile} />} />

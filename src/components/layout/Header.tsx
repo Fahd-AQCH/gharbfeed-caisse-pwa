@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { User as UserIcon, WifiOff, Wifi, CloudUpload } from 'lucide-react';
+import { User as UserIcon, WifiOff, Wifi, CloudUpload, Menu } from 'lucide-react';
 import { UserProfile } from '../../types';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../../lib/db';
@@ -9,17 +9,27 @@ import { cn } from '../../lib/utils';
 interface HeaderProps {
   profile: UserProfile | null;
   isOffline?: boolean;
+  /** U4 — ouvre/ferme le drawer sidebar sur mobile */
+  onToggleSidebar?: () => void;
 }
 
-export default function Header({ profile, isOffline = false }: HeaderProps) {
+export default function Header({ profile, isOffline = false, onToggleSidebar }: HeaderProps) {
   // U7 — compteur live de la file de synchro locale (pending + failed)
   const queuePending = useLiveQuery(() => db.sync_queue.where('status').anyOf('pending', 'processing').count(), []) ?? 0;
   const queueFailed = useLiveQuery(() => db.sync_queue.where('status').equals('failed').count(), []) ?? 0;
   const queueTotal = queuePending + queueFailed;
 
   return (
-    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 shrink-0">
+    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 sm:px-8 shrink-0">
       <div className="flex items-center gap-4 flex-1">
+        {/* Burger mobile (U4) — masqué ≥ lg où la sidebar est fixe */}
+        <button
+          onClick={onToggleSidebar}
+          className="lg:hidden p-2 -ml-1 rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors"
+          aria-label="Ouvrir le menu"
+        >
+          <Menu className="h-6 w-6" />
+        </button>
         <div className="text-slate-400 text-sm font-medium hidden sm:block">
           Bienvenue, <span className="font-bold text-slate-700">{profile?.username || '...'}</span>
         </div>

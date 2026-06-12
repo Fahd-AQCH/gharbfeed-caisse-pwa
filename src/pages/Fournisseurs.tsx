@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
+import { toast, askConfirm } from '../lib/notify';
 
 interface FournisseursProps {
   profile: UserProfile | null;
@@ -220,23 +221,30 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
       setEditingId(null);
       fetchFournisseurs();
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (id: number, nom: string) => {
-    if (!window.confirm(`Supprimer le fournisseur "${nom}" ?`)) return;
+    const ok = await askConfirm({
+      title: `Supprimer « ${nom} » ?`,
+      message: 'Le fournisseur sera définitivement supprimé (impossible si des achats lui sont liés).',
+      confirmLabel: 'Supprimer',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const { error } = await supabase
         .from('fournisseurs')
         .delete()
         .eq('id_fournisseur', id);
       if (error) throw error;
+      toast.success(`Fournisseur « ${nom} » supprimé.`);
       fetchFournisseurs();
     } catch (err) {
-      alert('Erreur suppression : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur suppression : ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 

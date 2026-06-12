@@ -21,6 +21,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { fetchLatestClosure, isBeforeLock, ClosureLock } from '../lib/closureLock';
 import { nowMaroc } from '../lib/serverTime';
+import { toast, askConfirm } from '../lib/notify';
 
 interface ExpensesProps {
   profile: UserProfile | null;
@@ -132,7 +133,7 @@ export default function Expenses({ profile }: ExpensesProps) {
 
   const openEdit = (e: Expense) => {
     if (isChargeLocked(e)) {
-      alert('Période clôturée : cette charge est verrouillée. Seul l\'administrateur peut la modifier.');
+      toast.warning('Période clôturée : cette charge est verrouillée. Seul l\'administrateur peut la modifier.');
       return;
     }
     setEditingId(e.id);
@@ -150,7 +151,7 @@ export default function Expenses({ profile }: ExpensesProps) {
     ev.preventDefault();
     const montant = parseFloat(form.montant);
     if (!Number.isFinite(montant) || montant <= 0) {
-      alert('Montant invalide.');
+      toast.error('Montant invalide.');
       return;
     }
     setSaving(true);
@@ -178,7 +179,7 @@ export default function Expenses({ profile }: ExpensesProps) {
       setEditingId(null);
       fetchExpenses();
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setSaving(false);
     }
@@ -186,16 +187,23 @@ export default function Expenses({ profile }: ExpensesProps) {
 
   const handleDelete = async (exp: Expense) => {
     if (isChargeLocked(exp)) {
-      alert('Période clôturée : cette charge est verrouillée. Seul l\'administrateur peut la supprimer.');
+      toast.warning('Période clôturée : cette charge est verrouillée. Seul l\'administrateur peut la supprimer.');
       return;
     }
-    if (!window.confirm('Supprimer cette charge ?')) return;
+    const ok = await askConfirm({
+      title: 'Supprimer cette charge ?',
+      message: `${exp.typeCharge} · ${exp.montant.toFixed(2)} DH${exp.description ? ` — ${exp.description}` : ''}`,
+      confirmLabel: 'Supprimer',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const { error } = await supabase.from('charges').delete().eq('id', exp.id);
       if (error) throw error;
+      toast.success('Charge supprimée.');
       fetchExpenses();
     } catch (err) {
-      alert('Erreur suppression : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur suppression : ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -239,7 +247,7 @@ export default function Expenses({ profile }: ExpensesProps) {
 
   // ── Export Excel des charges filtrées ───────────────────────────────────────
   const handleExportExcel = () => {
-    if (filtered.length === 0) { alert('Aucune charge à exporter avec ces filtres.'); return; }
+    if (filtered.length === 0) { toast.warning('Aucune charge à exporter avec ces filtres.'); return; }
     const rows = filtered.map((e) => ({
       'Date':            e.dateCharge || '',
       'Heure':           e.heureCharge ? e.heureCharge.slice(0, 5) : '',

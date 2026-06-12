@@ -6,6 +6,10 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
 import { commitOperation, syncAll } from '../lib/syncService';
 import { nowMaroc } from '../lib/serverTime';
+import { toast } from '../lib/notify';
+
+// B13a (règle stricte) : « Client Comptoir » est un CHOIX explicite, plus un défaut
+const COMPTOIR_ID = 'comptoir';
 import {
   Search,
   Plus,
@@ -21,6 +25,7 @@ import {
   ArrowLeft,
   Package,
   Loader2,
+  Truck,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -178,7 +183,7 @@ export default function Cashier({ profile }: CashierProps) {
       setQuickClientFonction('');
       setShowQuickClient(false);
     } catch (err: any) {
-      alert('Erreur création client : ' + (err.message || String(err)));
+      toast.error('Erreur création client : ' + (err.message || String(err)));
     } finally {
       setQuickClientLoading(false);
     }
@@ -216,7 +221,7 @@ export default function Cashier({ profile }: CashierProps) {
       setQuickFournisseurType('Personne physique');
       setShowQuickFournisseur(false);
     } catch (err: any) {
-      alert('Erreur création fournisseur : ' + (err.message || String(err)));
+      toast.error('Erreur création fournisseur : ' + (err.message || String(err)));
     } finally {
       setQuickFournisseurLoading(false);
     }
@@ -245,20 +250,55 @@ export default function Cashier({ profile }: CashierProps) {
       .map(({ p }) => p);
   })();
 
+  // U2 — quantités DÉCIMALES (vente en vrac : 12,5 kg) · B13b — stock jamais négatif
+  const roundQty = (n: number) => Math.round(n * 100) / 100;
+  const roundMoney = (n: number) => Math.round(n * 100) / 100;
+  const stockOf = (productId: string): number => {
+    const p = products.find((x) => x.id === productId);
+    return p ? p.stockActual : Number.POSITIVE_INFINITY;
+  };
+
+  /** Borne une quantité : ≥ 0.01, 2 décimales, et ≤ stock disponible en mode vente. */
+  const clampQty = (productId: string, qty: number): number => {
+    let q = Math.max(0.01, roundQty(qty));
+    if (operationType === 'vente') {
+      const max = stockOf(productId);
+      if (q > max + 1e-9) {
+        toast.warning(`Stock insuffisant : maximum ${max} disponible pour cet article.`);
+        q = Math.max(0.01, roundQty(max));
+      }
+    }
+    return q;
+  };
+
   const addToCart = (product: Product) => {
     const priceToUse =
       operationType === 'vente'
         ? product.defaultPrice
         : (product as any).purchasePrice || 0;
     const existing = cart.find((item) => item.productId === product.id);
+
+    // B13b : blocage strict du stock négatif à la vente
+    if (operationType === 'vente') {
+      if (product.stockActual <= 0) {
+        toast.error(`Stock épuisé : « ${product.name} » (0 en stock).`);
+        return;
+      }
+      const wanted = (existing?.quantity ?? 0) + 1;
+      if (wanted > product.stockActual + 1e-9) {
+        toast.warning(`Stock insuffisant : il ne reste que ${product.stockActual} « ${product.name} ».`);
+        return;
+      }
+    }
+
     if (existing) {
       setCart(
         cart.map((item) =>
           item.productId === product.id
             ? {
                 ...item,
-                quantity: item.quantity + 1,
-                lineTotal: (item.quantity + 1) * priceToUse,
+                quantity: roundQty(item.quantity + 1),
+                lineTotal: roundMoney(roundQty(item.quantity + 1) * priceToUse),
               }
             : item
         )
@@ -282,8 +322,8 @@ export default function Cashier({ profile }: CashierProps) {
     setCart(
       cart.map((item) => {
         if (item.productId === productId) {
-          const newQty = Math.max(1, item.quantity + delta);
-          return { ...item, quantity: newQty, lineTotal: newQty * item.unitPrice };
+          const newQty = clampQty(productId, item.quantity + delta);
+          return { ...item, quantity: newQty, lineTotal: roundMoney(newQty * item.unitPrice) };
         }
         return item;
       })
@@ -291,12 +331,12 @@ export default function Cashier({ profile }: CashierProps) {
   };
 
   const setQuantity = (productId: string, rawValue: string) => {
-    const parsed = parseInt(rawValue, 10);
-    const newQty = Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+    const parsed = parseFloat(rawValue.replace(',', '.'));
+    const newQty = clampQty(productId, Number.isFinite(parsed) && parsed > 0 ? parsed : 0.01);
     setCart(
       cart.map((item) => {
         if (item.productId === productId) {
-          return { ...item, quantity: newQty, lineTotal: newQty * item.unitPrice };
+          return { ...item, quantity: newQty, lineTotal: roundMoney(newQty * item.unitPrice) };
         }
         return item;
       })
@@ -463,7 +503,7 @@ export default function Cashier({ profile }: CashierProps) {
 
   const handleCreateReturn = async () => {
     const toReturn = returnItems.filter((i) => i.returnQty > 0.001);
-    if (!toReturn.length) { alert('Sélectionnez au moins un article à retourner.'); return; }
+    if (!toReturn.length) { toast.warning('Sélectionnez au moins un article à retourner.'); return; }
     setCreatingReturn(true);
     try {
       const { date: todayStr, heure: timeStr } = nowMaroc();
@@ -524,9 +564,9 @@ export default function Cashier({ profile }: CashierProps) {
       setReturnSearchResults([]);
       setSelectedReturnOp(null);
       setReturnItems([]);
-      alert(`✅ Retour OP-${String(returnOp.num_op).padStart(4, '0')} créé avec succès. Stock recredité.`);
+      toast.success(`Retour OP-${String(returnOp.num_op).padStart(4, '0')} créé avec succès. Stock recrédité.`);
     } catch (err: any) {
-      alert('Erreur retour : ' + (err.message || String(err)));
+      toast.error('Erreur retour : ' + (err.message || String(err)));
     } finally {
       setCreatingReturn(false);
     }
@@ -535,42 +575,83 @@ export default function Cashier({ profile }: CashierProps) {
   const handleValidateOperation = async () => {
     if (!profile?.id) {
       console.error('[Cashier] validate — profil absent, opération annulée');
-      alert('Session utilisateur non prête. Réessayez dans quelques secondes.');
+      toast.error('Session utilisateur non prête. Réessayez dans quelques secondes.');
       return;
     }
     if (cart.length === 0) return;
     if (products.length === 0) {
-      alert('Catalogue produits non chargé. Vérifiez votre connexion et réessayez.');
+      toast.error('Catalogue produits non chargé. Vérifiez votre connexion et réessayez.');
       return;
     }
+
+    const isVenteOp = operationType === 'vente';
+
+    // ── B13a (RÈGLE STRICTE) : le client doit être choisi EXPLICITEMENT ──────
+    if (isVenteOp && !selectedClient) {
+      toast.error('Sélectionnez un client — même « Client Comptoir » — avant d\'encaisser.');
+      return;
+    }
+    // Créance anonyme interdite : pas de crédit pour le comptoir
+    if (isVenteOp && selectedClient?.id === COMPTOIR_ID && resteAPayer > 0.01) {
+      toast.error('Vente à crédit impossible pour « Client Comptoir ».\nSélectionnez un client identifié pour créer une créance.');
+      return;
+    }
+    // ── B13c : remise illogique (négative ou > sous-total) ───────────────────
+    if (isVenteOp && (discountGlobal < 0 || discountGlobal > grossTotal + 0.001)) {
+      toast.error(`Remise invalide : elle ne peut pas dépasser le sous-total (${grossTotal.toFixed(2)} DH).`);
+      return;
+    }
+    // ── B13b : re-contrôle final du stock (le panier a pu vieillir) ──────────
+    if (isVenteOp) {
+      for (const item of cart) {
+        const stock = stockOf(item.productId);
+        if (item.quantity > stock + 1e-9) {
+          toast.error(`Stock insuffisant pour « ${item.name} » : ${stock} disponible(s), ${item.quantity} demandé(s).`);
+          return;
+        }
+      }
+    }
+    // Vente à crédit : échéance obligatoire (garde défensive, le bouton la bloque déjà)
+    if (isVenteOp && resteAPayer > 0.01 && !dateEcheance) {
+      toast.error('Date d\'échéance obligatoire pour toute vente à crédit.');
+      return;
+    }
+
     setLoading(true);
     try {
       const { date: todayStr, heure: timeStr } = nowMaroc();
-      const isVente = operationType === 'vente';
+      const isVente = isVenteOp;
 
       // ── Build header & items payloads ─────────────────────────────────────
+      // U5 (RÈGLE STRICTE) : un ACHAT ne porte AUCUNE condition financière à la
+      // saisie caissier — montant payé, échéance et mode sont fixés par l'admin
+      // à la validation (RPC validate_purchase).
       const header: Record<string, unknown> = {
         date_op:   todayStr,
         heure_op:  timeStr,
         type_op:   operationType,
         total_dh:  finalTotal,
-        remise_dh: discountGlobal,
+        remise_dh: isVente ? discountGlobal : 0,
         utilisateur_id: profile?.id,
-        client_id:      isVente ? (selectedClient ? parseInt(selectedClient.id) : null) : null,
+        client_id:      isVente
+          ? (selectedClient && selectedClient.id !== COMPTOIR_ID ? parseInt(selectedClient.id) : null)
+          : null,
         fournisseur_id: !isVente ? (selectedFournisseur?.id_fournisseur ?? null) : null,
         statut:         isVente ? 'valide' : 'en_attente',
-        condition_paiement: conditionPaiement,
-        ref_paiement:   refPaiement.trim() || null,
-        montant_paye:   conditionPaiement === 'Versement'
-          ? montantPayeNum
-          : (montantSaisi ? Math.min(montantPayeNum, finalTotal) : finalTotal),
-        reste_a_payer:  resteAPayer,
-        date_echeance:  resteAPayer > 0.01 && dateEcheance ? dateEcheance : null,
-        date_versement: conditionPaiement === 'Versement' && dateVersement ? dateVersement : null,
-        statut_paiement: statutPaiement,
-        banque_cheque:  conditionPaiement === 'Chèque' ? (banqueCheque.trim() || null) : null,
-        proprietaire_cheque: conditionPaiement === 'Chèque' ? (proprietaireCheque.trim() || null) : null,
-        date_encaissement_cheque: conditionPaiement === 'Chèque' && dateEncaissementCheque ? dateEncaissementCheque : null,
+        condition_paiement: isVente ? conditionPaiement : 'Espèce',
+        ref_paiement:   isVente ? (refPaiement.trim() || null) : null,
+        montant_paye:   isVente
+          ? (conditionPaiement === 'Versement'
+              ? montantPayeNum
+              : (montantSaisi ? Math.min(montantPayeNum, finalTotal) : finalTotal))
+          : 0,
+        reste_a_payer:  isVente ? resteAPayer : 0,
+        date_echeance:  isVente && resteAPayer > 0.01 && dateEcheance ? dateEcheance : null,
+        date_versement: isVente && conditionPaiement === 'Versement' && dateVersement ? dateVersement : null,
+        statut_paiement: isVente ? statutPaiement : null,
+        banque_cheque:  isVente && conditionPaiement === 'Chèque' ? (banqueCheque.trim() || null) : null,
+        proprietaire_cheque: isVente && conditionPaiement === 'Chèque' ? (proprietaireCheque.trim() || null) : null,
+        date_encaissement_cheque: isVente && conditionPaiement === 'Chèque' && dateEncaissementCheque ? dateEncaissementCheque : null,
         canal_vente: isVente ? canalVente : null,
         observ: isVente ? 'Vente caisse' : 'Achat en attente de validation admin',
       };
@@ -679,7 +760,7 @@ export default function Cashier({ profile }: CashierProps) {
             generateTicketPDF(ticketOp, ticketItems);
           } catch (pdfErr) {
             console.error('[Cashier] generateTicketPDF:', pdfErr);
-            alert('La vente est enregistrée, mais le ticket PDF a échoué.');
+            toast.warning('La vente est enregistrée, mais le ticket PDF a échoué.');
           }
         });
 
@@ -688,7 +769,7 @@ export default function Cashier({ profile }: CashierProps) {
         const msg = queued
           ? '📶 Achat sauvegardé localement. Sync à la reconnexion.'
           : '📦 Achat enregistré. En attente de validation Admin.';
-        if (!queued) alert(msg);
+        if (!queued) toast.success(msg);
         setSuccessMessage(msg);
         setSuccess(true);
         setCart([]);
@@ -715,8 +796,8 @@ export default function Cashier({ profile }: CashierProps) {
       console.log('[Cashier] validate — flow complete');
     } catch (err) {
       console.error(err);
-      alert(
-        "Erreur lors de la validation de l'opération: " +
+      toast.error(
+        "Erreur lors de la validation de l'opération : " +
           (err instanceof Error ? err.message : String(err))
       );
     } finally {
@@ -865,9 +946,9 @@ export default function Cashier({ profile }: CashierProps) {
                     <Minus className="h-3.5 w-3.5" />
                   </button>
                   <input
-                    type="number" min="1" step="1" value={item.quantity}
+                    type="number" min="0.01" step="0.01" value={item.quantity}
                     onChange={(e) => setQuantity(item.productId, e.target.value)}
-                    className="w-10 text-center text-sm font-black text-emerald-700 bg-white border border-emerald-300 rounded focus:ring-2 focus:ring-emerald-500 focus:border-transparent py-0.5"
+                    className="w-14 text-center text-sm font-black text-emerald-700 bg-white border border-emerald-300 rounded focus:ring-2 focus:ring-emerald-500 focus:border-transparent py-0.5"
                     aria-label={`Quantité ${item.name}`}
                   />
                   <button onClick={() => updateQuantity(item.productId, 1)} className="p-1.5 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700 transition-colors">
@@ -908,10 +989,14 @@ export default function Cashier({ profile }: CashierProps) {
                   <span className="text-xs font-medium">Remise</span>
                 </div>
                 <input
-                  type="number"
+                  type="number" min="0" step="0.01" max={grossTotal}
                   className="bg-slate-50 border border-slate-200 rounded-lg py-0.5 px-2 text-right w-16 text-xs font-bold text-emerald-600 focus:ring-1 focus:ring-emerald-400"
                   value={discountGlobal}
-                  onChange={(e) => setDiscountGlobal(Number(e.target.value))}
+                  onChange={(e) => {
+                    // B13c : la remise ne peut être ni négative ni dépasser le sous-total
+                    const v = Number(e.target.value) || 0;
+                    setDiscountGlobal(Math.min(Math.max(0, v), roundMoney(grossTotal)));
+                  }}
                 />
               </div>
             )}
@@ -1039,11 +1124,26 @@ export default function Cashier({ profile }: CashierProps) {
                   {operationType === 'vente' ? (
                     <div className="flex gap-2">
                       <select
-                        className="flex-1 bg-slate-50 border border-slate-200 rounded-xl py-2.5 px-3 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-emerald-500/20"
+                        className={cn(
+                          'flex-1 bg-slate-50 rounded-xl py-2.5 px-3 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-emerald-500/20 border-2',
+                          // B13a : tant qu'aucun choix explicite n'est fait, le champ est marqué
+                          !selectedClient ? 'border-rose-300' : 'border-slate-200'
+                        )}
                         value={selectedClient?.id || ''}
-                        onChange={(e) => setSelectedClient(clients.find((c) => c.id === e.target.value) || null)}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === COMPTOIR_ID) {
+                            setSelectedClient({
+                              id: COMPTOIR_ID, name: 'Client Comptoir', phone: '', address: '',
+                              function: '', createdAt: new Date() as any, updatedAt: new Date() as any,
+                            } as Client);
+                          } else {
+                            setSelectedClient(clients.find((c) => c.id === v) || null);
+                          }
+                        }}
                       >
-                        <option value="">Client Comptoir (Par défaut)</option>
+                        <option value="" disabled>— Sélectionner un client (obligatoire) —</option>
+                        <option value={COMPTOIR_ID}>Client Comptoir</option>
                         {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                       </select>
                       <button
@@ -1100,7 +1200,24 @@ export default function Cashier({ profile }: CashierProps) {
                   </div>
                 )}
 
-                {/* ── Section B: Payment method ── */}
+                {/* ── U5 (RÈGLE STRICTE) : achat = marchandises uniquement ── */}
+                {operationType === 'achat' && (
+                  <div className="px-6 py-5 border-b border-slate-100">
+                    <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-2xl p-4">
+                      <Truck className="h-5 w-5 text-blue-500 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-sm font-black text-blue-800">Enregistrement des marchandises uniquement</p>
+                        <p className="text-xs font-medium text-blue-600 mt-0.5">
+                          Les conditions financières (montant payé, mode de paiement, échéance) seront
+                          fixées par l'administrateur lors de la validation de cet achat.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Section B: Payment method (VENTE uniquement — U5) ── */}
+                {operationType === 'vente' && (
                 <div className="px-6 py-5 border-b border-slate-100">
                   <div className="flex items-center gap-2 mb-3">
                     <div className={cn(
@@ -1131,9 +1248,10 @@ export default function Cashier({ profile }: CashierProps) {
                   </div>
 
                 </div>
+                )}
 
-                {/* ── Section C: Détails du paiement — ALL modes, ALL operation types ── */}
-                {(
+                {/* ── Section C: Détails du paiement (VENTE uniquement — U5) ── */}
+                {operationType === 'vente' && (
                   <div className="px-6 py-5 border-b border-slate-100">
                     <div className="flex items-center gap-2 mb-4">
                       <div className={cn('h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-black text-white shrink-0',
@@ -1150,7 +1268,7 @@ export default function Cashier({ profile }: CashierProps) {
                       </label>
                       <input
                         type="number" min="0" step="0.01"
-                        placeholder={hideAchatAmounts ? 'Montant versé au fournisseur' : `${finalTotal.toFixed(2)} DH`}
+                        placeholder={`${finalTotal.toFixed(2)} DH`}
                         className="w-full bg-white border-2 border-slate-200 rounded-xl py-2.5 px-4 text-base font-black text-slate-800 focus:ring-2 focus:ring-emerald-400/30 focus:border-emerald-400"
                         value={montantPaye}
                         onChange={(e) => setMontantPaye(e.target.value)}
@@ -1338,10 +1456,12 @@ export default function Cashier({ profile }: CashierProps) {
                       </p>
                     )}
                   </div>
-                  <div className="text-right">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase">Mode</p>
-                    <p className="text-sm font-black text-slate-700">{conditionPaiement}</p>
-                  </div>
+                  {operationType === 'vente' && (
+                    <div className="text-right">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase">Mode</p>
+                      <p className="text-sm font-black text-slate-700">{conditionPaiement}</p>
+                    </div>
+                  )}
                 </div>
 
                 <button
@@ -1349,13 +1469,18 @@ export default function Cashier({ profile }: CashierProps) {
                   disabled={
                     loading ||
                     cart.length === 0 ||
-                    // Partial payment always requires a debt due date
-                    (resteAPayer > 0.01 && !dateEcheance) ||
-                    // Versement: reference + virement date mandatory
-                    (conditionPaiement === 'Versement' && (!refPaiement.trim() || !dateVersement)) ||
-                    // Chèque: all 4 fields mandatory
-                    (conditionPaiement === 'Chèque' && (
-                      !refPaiement.trim() || !banqueCheque.trim() || !proprietaireCheque.trim() || !dateEncaissementCheque
+                    // Règles financières : VENTE uniquement (U5 — l'achat n'a plus de saisie financière)
+                    (operationType === 'vente' && (
+                      // B13a : client explicite obligatoire
+                      !selectedClient ||
+                      // Partial payment always requires a debt due date
+                      (resteAPayer > 0.01 && !dateEcheance) ||
+                      // Versement: reference + virement date mandatory
+                      (conditionPaiement === 'Versement' && (!refPaiement.trim() || !dateVersement)) ||
+                      // Chèque: all 4 fields mandatory
+                      (conditionPaiement === 'Chèque' && (
+                        !refPaiement.trim() || !banqueCheque.trim() || !proprietaireCheque.trim() || !dateEncaissementCheque
+                      ))
                     ))
                   }
                   className={cn(

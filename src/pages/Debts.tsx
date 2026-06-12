@@ -31,6 +31,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { generateDebtPaymentPDF } from '../utils/debtPdfGenerator';
 import { fetchLatestClosure, isBeforeLock, ClosureLock } from '../lib/closureLock';
 import { nowMaroc } from '../lib/serverTime';
+import { toast, askConfirm } from '../lib/notify';
 
 interface DebtsProps {
   profile: UserProfile | null;
@@ -158,32 +159,42 @@ export default function Debts({ profile }: DebtsProps) {
       const { error } = await supabase.rpc('decide_debt_payment', {
         p_payment_id: p.id,
         p_decision: 'valide',
+        p_admin_id: profile?.id ?? null, // B11 — trace du validateur
       });
       if (error) throw error;
 
+      toast.success(`Paiement de ${p.montant.toFixed(2)} DH validé — créance ${p.opNumber} mise à jour.`);
       setPaymentHistories(prev => { const n = { ...prev }; delete n[p.operationId]; return n; });
       setHistoryLoaded(false);
       fetchPendingPayments();
       fetchDebts();
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
       fetchPendingPayments(); // resynchronise la file (cas « déjà traité »)
     }
   };
 
   // Rejet admin via la même RPC : passage en 'annule' (audit), créance intacte
   const handleRejectPendingPayment = async (p: DebtPayment & { opNumber: string; counterpartyName: string }) => {
-    if (!window.confirm(`Rejeter le paiement de ${p.montant.toFixed(2)} DH (${p.opNumber} · ${p.counterpartyName}) ?\nIl sera marqué ANNULÉ et n'affectera pas la créance.`)) return;
+    const ok = await askConfirm({
+      title: 'Rejeter ce paiement ?',
+      message: `Paiement de ${p.montant.toFixed(2)} DH (${p.opNumber} · ${p.counterpartyName}).\nIl sera marqué ANNULÉ et n'affectera pas la créance.`,
+      confirmLabel: 'Rejeter',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const { error } = await supabase.rpc('decide_debt_payment', {
         p_payment_id: p.id,
         p_decision: 'annule',
+        p_admin_id: profile?.id ?? null, // B11 — trace du décideur
       });
       if (error) throw error;
+      toast.info(`Paiement rejeté — la créance ${p.opNumber} reste inchangée.`);
       setPaymentHistories(prev => { const n = { ...prev }; delete n[p.operationId]; return n; });
       fetchPendingPayments();
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
       fetchPendingPayments();
     }
   };
@@ -390,7 +401,8 @@ export default function Debts({ profile }: DebtsProps) {
         .order('created_at', { ascending: true })
         .order('id', { ascending: true });
 
-      const agentIds = [...new Set((payments || []).map((p: any) => p.utilisateur_id).filter(Boolean))];
+      // Encaisseurs + validateurs (B11) résolus en un seul lookup
+      const agentIds = [...new Set((payments || []).flatMap((p: any) => [p.utilisateur_id, p.validated_by]).filter(Boolean))];
       const agentMap: Record<string, string> = {};
       if (agentIds.length > 0) {
         const { data: agents } = await supabase
@@ -413,6 +425,9 @@ export default function Debts({ profile }: DebtsProps) {
         notes: p.notes,
         createdAt: p.created_at,
         statut: (p.statut ?? 'valide') as DebtPayment['statut'],
+        validatedBy: p.validated_by ?? undefined,
+        validatedByName: p.validated_by ? (agentMap[p.validated_by] || '—') : undefined,
+        validatedAt: p.validated_at ?? undefined,
       }));
       setPaymentHistories(prev => ({ ...prev, [opId]: mapped }));
     } catch (err) {
@@ -447,9 +462,9 @@ export default function Debts({ profile }: DebtsProps) {
     e.preventDefault();
     if (!activeDebt || !profile?.id) return;
     const amount = parseFloat(payAmount);
-    if (!Number.isFinite(amount) || amount <= 0) { alert('Montant invalide.'); return; }
+    if (!Number.isFinite(amount) || amount <= 0) { toast.error('Montant invalide.'); return; }
     if (amount > activeDebt.resteAPayer + 0.01) {
-      alert(`Le montant (${amount.toFixed(2)} DH) dépasse le solde dû (${activeDebt.resteAPayer.toFixed(2)} DH).`);
+      toast.error(`Le montant (${amount.toFixed(2)} DH) dépasse le solde dû (${activeDebt.resteAPayer.toFixed(2)} DH).`);
       return;
     }
     setPayLoading(true);
@@ -509,12 +524,12 @@ export default function Debts({ profile }: DebtsProps) {
       fetchDebts();
       if (isPending) {
         fetchPendingPayments();
-        alert(`⏳ Paiement de ${amount.toFixed(2)} DH enregistré — EN ATTENTE de validation par l'administrateur.\nUn reçu provisoire a été généré.`);
+        toast.info(`⏳ Paiement de ${amount.toFixed(2)} DH enregistré — EN ATTENTE de validation par l'administrateur.\nUn reçu provisoire a été généré.`);
       } else if (isSolde) {
-        alert(`✅ La créance ${activeDebt.operationNumber} est intégralement soldée !`);
+        toast.success(`La créance ${activeDebt.operationNumber} est intégralement soldée !`);
       }
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setPayLoading(false);
     }
@@ -539,7 +554,7 @@ export default function Debts({ profile }: DebtsProps) {
   const handleSaveEcheance = async (debt: DebtOp) => {
     // Garde défensive — le bouton est déjà masqué, mais on bloque aussi l'action
     if (isOpLocked(debt)) {
-      alert('Période clôturée : cette opération est verrouillée. Seul l\'administrateur peut la modifier.');
+      toast.warning('Période clôturée : cette opération est verrouillée. Seul l\'administrateur peut la modifier.');
       return;
     }
     try {
@@ -553,7 +568,7 @@ export default function Debts({ profile }: DebtsProps) {
       if (debt.kind === 'fournisseur') fetchSupplierCredits();
       else fetchDebts();
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -710,6 +725,13 @@ export default function Debts({ profile }: DebtsProps) {
                       )}
                     </p>
                     {p.agentName && p.agentName !== '—' && <p className="text-[10px] text-slate-400 font-medium">par {p.agentName}</p>}
+                    {/* B11 — trace du validateur/rejeteur (visible si différent de l'encaisseur) */}
+                    {p.validatedByName && p.validatedBy !== p.utilisateurId && (
+                      <p className={cn('text-[10px] font-bold', st === 'annule' ? 'text-rose-500' : 'text-emerald-600')}>
+                        {st === 'annule' ? 'rejeté' : 'validé'} par {p.validatedByName}
+                        {p.validatedAt && ` · ${new Date(p.validatedAt).toLocaleDateString('fr-FR')}`}
+                      </p>
+                    )}
                     {p.notes && <p className="text-[10px] text-slate-400 italic">{p.notes}</p>}
                   </div>
                   <div className="flex items-center gap-2">

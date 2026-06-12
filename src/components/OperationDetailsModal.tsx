@@ -6,6 +6,7 @@ import { cn } from '../lib/utils';
 import { motion } from 'motion/react';
 import { generateTicketPDF, TicketItem, TicketOperation } from '../utils/pdfGenerator';
 import { nowMaroc } from '../lib/serverTime';
+import { toast, askConfirm } from '../lib/notify';
 
 interface OperationDetailsModalProps {
   operation: Operation;
@@ -40,6 +41,8 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
   // ── Paiement fournisseur à la validation d'un achat (comptes fournisseurs) ──
   const [supplierPaid, setSupplierPaid] = useState('');
   const [supplierEcheance, setSupplierEcheance] = useState('');
+  // U5 (Sprint 2) : le mode de paiement est choisi par l'ADMIN à la validation
+  const [supplierMode, setSupplierMode] = useState<'Espèce' | 'Chèque' | 'Versement'>('Espèce');
 
   const isAdmin = profile?.roleId === 'admin';
   const isCashier = profile?.roleId === 'cashier';
@@ -198,9 +201,11 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
 
   // ── Modification quantité / prix (pending purchase only) ─────────────────
   const handleQuantityChange = (itemId: string, newQty: number) => {
+    // U2 — quantités décimales (achats en vrac au kg)
+    const q = Math.max(0.01, Math.round(newQty * 100) / 100);
     setItems((prev) => prev.map((i) =>
       i.id === itemId
-        ? { ...i, quantity: Math.max(1, newQty), lineTotal: i.unitPrice * Math.max(1, newQty) }
+        ? { ...i, quantity: q, lineTotal: Math.round(i.unitPrice * q * 100) / 100 }
         : i
     ));
   };
@@ -258,11 +263,13 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
   const [cancelling, setCancelling] = useState(false);
   const handleCancelPurchase = async () => {
     if (!isAdmin || !isPendingPurchase) return;
-    if (!window.confirm(
-      `Annuler définitivement l'achat ${operation.operationNumber} ?\n\n` +
-      `Aucun stock ne sera mis à jour, aucun crédit fournisseur ne sera créé.\n` +
-      `L'opération restera visible dans l'historique avec le statut ANNULÉ.`
-    )) return;
+    const ok = await askConfirm({
+      title: `Annuler l'achat ${operation.operationNumber} ?`,
+      message: 'Aucun stock ne sera mis à jour, aucun crédit fournisseur ne sera créé.\nL\'opération restera visible dans l\'historique avec le statut ANNULÉ.',
+      confirmLabel: 'Annuler l\'achat',
+      danger: true,
+    });
+    if (!ok) return;
     setCancelling(true);
     try {
       // RPC atomique : refuse proprement si l'achat a déjà été validé/annulé ailleurs
@@ -270,10 +277,11 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
         p_num_op: parseInt(operation.id),
       });
       if (error) throw error;
+      toast.info(`Achat ${operation.operationNumber} annulé — conservé en historique.`);
       onUpdate();
       onClose();
     } catch (err) {
-      alert("Erreur lors de l'annulation : " + (err instanceof Error ? err.message : String(err)));
+      toast.error("Erreur lors de l'annulation : " + (err instanceof Error ? err.message : String(err)));
     } finally {
       setCancelling(false);
     }
@@ -288,11 +296,11 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
 
     // Règles comptes fournisseurs : montant payé ≤ total ; échéance obligatoire si solde restant
     if (supplierPaidNum < 0 || supplierPaidNum > finalTotal + 0.01) {
-      alert(`Le montant payé (${supplierPaidNum.toFixed(2)} DH) doit être compris entre 0 et le total de l'achat (${finalTotal.toFixed(2)} DH).`);
+      toast.error(`Le montant payé (${supplierPaidNum.toFixed(2)} DH) doit être compris entre 0 et le total de l'achat (${finalTotal.toFixed(2)} DH).`);
       return;
     }
     if (supplierReste > 0.01 && !supplierEcheance) {
-      alert(`Un solde de ${supplierReste.toFixed(2)} DH reste dû au fournisseur.\nLa date d'échéance est obligatoire pour les paiements partiels.`);
+      toast.error(`Un solde de ${supplierReste.toFixed(2)} DH reste dû au fournisseur.\nLa date d'échéance est obligatoire pour les paiements partiels.`);
       return;
     }
 
@@ -314,14 +322,17 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
           prix_unitaire: item.unitPrice,
           total_ligne: item.lineTotal,
         })),
+        // U5 (Sprint 2) : le mode de paiement fournisseur est fixé ICI par l'admin
+        p_condition_paiement: supplierMode,
       });
       if (error) throw error;
 
+      toast.success(`Achat ${operation.operationNumber} validé — stock mis à jour.`);
       onUpdate();
       onClose();
     } catch (err) {
       console.error(err);
-      alert("Erreur lors de la validation de l'achat: " + (err instanceof Error ? err.message : String(err)));
+      toast.error("Erreur lors de la validation de l'achat : " + (err instanceof Error ? err.message : String(err)));
     } finally {
       setValidating(false);
     }
@@ -356,7 +367,7 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
     if (!isAdmin) return;
     const toReturn = returnItems.filter((i) => i.returnQty > 0);
     if (toReturn.length === 0) {
-      alert('Veuillez sélectionner au moins un article à retourner.');
+      toast.warning('Veuillez sélectionner au moins un article à retourner.');
       return;
     }
     setCreatingReturn(true);
@@ -448,9 +459,9 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
       onUpdate();
       onClose();
       const label = returnForPurchase ? 'Retour fournisseur' : 'Avoir';
-      alert(`✅ ${label} OP-${String(returnOp.num_op).padStart(4, '0')} créé — stock mis à jour.`);
+      toast.success(`${label} OP-${String(returnOp.num_op).padStart(4, '0')} créé — stock mis à jour.`);
     } catch (err) {
-      alert('Erreur création retour : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur création retour : ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setCreatingReturn(false);
     }
@@ -579,6 +590,25 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                     <div>
                       <p className="text-sm font-black text-orange-800">Achat en attente de validation</p>
                       <p className="text-xs text-orange-600">Vérifiez les prix, renseignez le paiement fournisseur, puis validez pour mettre à jour le stock.</p>
+                    </div>
+                  </div>
+                  <div className="px-4 pb-3">
+                    <label className="text-[10px] font-black text-orange-700 uppercase tracking-widest block mb-1.5">Mode de paiement fournisseur</label>
+                    <div className="flex gap-2">
+                      {(['Espèce', 'Chèque', 'Versement'] as const).map((m) => (
+                        <button
+                          key={m} type="button"
+                          onClick={() => setSupplierMode(m)}
+                          className={cn(
+                            'flex-1 py-2 rounded-xl text-xs font-bold border-2 transition-all',
+                            supplierMode === m
+                              ? 'bg-orange-500 text-white border-orange-500'
+                              : 'bg-white text-slate-600 border-orange-200 hover:border-orange-400'
+                          )}
+                        >
+                          {m}
+                        </button>
+                      ))}
                     </div>
                   </div>
                   <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -809,7 +839,7 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
                           <td className="px-4 py-3 font-bold text-slate-700">
                             {(isPendingPurchase && isAdmin) ? (
                               <input
-                                type="number"
+                                type="number" min="0.01" step="0.01"
                                 className="w-20 text-center bg-slate-50 border border-slate-200 rounded-lg p-1 text-sm font-bold focus:ring-2 focus:ring-blue-500/20"
                                 value={item.quantity}
                                 onChange={(e) => handleQuantityChange(item.id, Number(e.target.value))}

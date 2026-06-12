@@ -24,6 +24,7 @@ import { cn } from '../lib/utils';
 import OperationDetailsModal from '../components/OperationDetailsModal';
 import { generateTicketPDF, TicketItem, TicketOperation } from '../utils/pdfGenerator';
 import { fetchLatestClosure, isBeforeLock, ClosureLock } from '../lib/closureLock';
+import { toast } from '../lib/notify';
 
 interface HistoryProps {
   profile: UserProfile | null;
@@ -543,7 +544,7 @@ export default function History({ profile }: HistoryProps) {
       generateTicketPDF(ticketOp, ticketItems);
     } catch (err) {
       console.error('[History] handlePrintTicket:', err);
-      alert('Impossible de générer le ticket. Vérifiez la connexion.');
+      toast.error('Impossible de générer le ticket. Vérifiez la connexion.');
     } finally {
       setPrintingId(null);
     }

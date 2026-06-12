@@ -4,6 +4,7 @@ import { supabase } from '../supabase';
 import { Users, Plus, Search, User, Phone, MapPin, Briefcase, Edit2, X, Loader2, Eye, TrendingUp, CreditCard, ShoppingBag, Ban, RotateCcw, Trash2, AlertTriangle } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
+import { toast, askConfirm } from '../lib/notify';
 
 interface ClientAccount {
   clientId: number;
@@ -138,16 +139,24 @@ export default function Clients({ profile }: ClientsProps) {
   // ── Soft delete (désactivation) — réversible ───────────────────────────────
   const handleToggleActif = async (client: Client) => {
     const target = !(client.actif !== false);
-    if (!target && !window.confirm(`Désactiver le client « ${client.name} » ?\nIl n'apparaîtra plus dans les listes mais son historique est conservé.`)) return;
+    if (!target) {
+      const ok = await askConfirm({
+        title: `Désactiver « ${client.name} » ?`,
+        message: 'Il n\'apparaîtra plus dans les listes mais son historique est conservé.',
+        confirmLabel: 'Désactiver',
+      });
+      if (!ok) return;
+    }
     try {
       const { error } = await supabase
         .from('clients')
         .update({ actif: target })
         .eq('id_client', parseInt(client.id));
       if (error) throw error;
+      toast.success(target ? `Client « ${client.name} » réactivé.` : `Client « ${client.name} » désactivé.`);
       fetchClients();
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -160,18 +169,25 @@ export default function Clients({ profile }: ClientsProps) {
         .eq('client_id', parseInt(client.id));
       if (cntErr) throw cntErr;
       if (count && count > 0) {
-        alert(`Suppression impossible : ${count} opération(s) sont liées à « ${client.name} ».\nUtilisez plutôt la désactivation pour préserver l'historique.`);
+        toast.warning(`Suppression impossible : ${count} opération(s) sont liées à « ${client.name} ».\nUtilisez plutôt la désactivation pour préserver l'historique.`);
         return;
       }
-      if (!window.confirm(`⚠ SUPPRESSION DÉFINITIVE de « ${client.name} »\n\nCette action est irréversible. Confirmer ?`)) return;
+      const ok = await askConfirm({
+        title: `Supprimer définitivement « ${client.name} » ?`,
+        message: 'Cette action est irréversible.',
+        confirmLabel: 'Supprimer définitivement',
+        danger: true,
+      });
+      if (!ok) return;
       const { error } = await supabase
         .from('clients')
         .delete()
         .eq('id_client', parseInt(client.id));
       if (error) throw error;
+      toast.success(`Client « ${client.name} » supprimé définitivement.`);
       fetchClients();
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 

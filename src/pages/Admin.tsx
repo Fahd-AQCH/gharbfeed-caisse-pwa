@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
+import { toast, askConfirm } from '../lib/notify';
 import {
   ResponsiveContainer,
   LineChart, Line,
@@ -133,6 +134,8 @@ export default function Admin({ profile }: AdminProps) {
   const [topProduits, setTopProduits] = useState<{ name: string; qte: number }[]>([]);
   const [caCategorie, setCaCategorie] = useState<{ name: string; value: number }[]>([]);
   const [paiementsPie, setPaiementsPie] = useState<{ name: string; value: number }[]>([]);
+  // F5 — CA par canal de vente (colonne canal_vente, enfin exploitée)
+  const [canalCA, setCanalCA] = useState<{ name: string; value: number }[]>([]);
   const [topClients, setTopClients] = useState<{ nom: string; total: number }[]>([]);
   const [topFournisseursData, setTopFournisseursData] = useState<{ nom: string; total: number }[]>([]);
 
@@ -420,20 +423,27 @@ export default function Admin({ profile }: AdminProps) {
       fetchFournisseurs();
       fetchAchatsParFournisseur();
     } catch (err: any) {
-      alert('Erreur : ' + (err.message || String(err)));
+      toast.error('Erreur : ' + (err.message || String(err)));
     } finally {
       setSavingFournisseur(false);
     }
   };
 
   const handleDeleteFournisseur = async (id: number) => {
-    if (!window.confirm('Supprimer ce fournisseur ? Cette action est irréversible.')) return;
+    const ok = await askConfirm({
+      title: 'Supprimer ce fournisseur ?',
+      message: 'Cette action est irréversible (impossible si des achats lui sont liés).',
+      confirmLabel: 'Supprimer',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const { error } = await supabase.from('fournisseurs').delete().eq('id_fournisseur', id);
       if (error) throw error;
+      toast.success('Fournisseur supprimé.');
       fetchFournisseurs();
     } catch (err: any) {
-      alert('Erreur suppression : ' + (err.message || String(err)));
+      toast.error('Erreur suppression : ' + (err.message || String(err)));
     }
   };
 
@@ -467,7 +477,7 @@ export default function Admin({ profile }: AdminProps) {
       // ── Requêtes parallèles ───────────────────────────────────────────────
       let opsQuery = supabase
         .from('operations')
-        .select('num_op, date_op, type_op, total_dh, client_id, fournisseur_id, condition_paiement')
+        .select('num_op, date_op, type_op, total_dh, client_id, fournisseur_id, condition_paiement, canal_vente')
         .in('type_op', ['vente', 'achat'])
         .eq('statut', 'valide')
         .gte('date_op', startDateStr)
@@ -605,6 +615,18 @@ export default function Admin({ profile }: AdminProps) {
       });
       setPaiementsPie(Object.entries(paiMap).map(([name, value]) => ({ name, value })));
 
+      // ── F5 : CA par canal de vente ────────────────────────────────────────
+      const canalMap: Record<string, number> = {};
+      venteOps.forEach((op: any) => {
+        const c = op.canal_vente || 'Sur place';
+        canalMap[c] = (canalMap[c] || 0) + parseFloat(op.total_dh || 0);
+      });
+      setCanalCA(
+        Object.entries(canalMap)
+          .sort(([, a], [, b]) => b - a)
+          .map(([name, value]) => ({ name, value: Math.round(value) }))
+      );
+
       // ── Top 5 clients ─────────────────────────────────────────────────────
       const clientTotals: Record<number, number> = {};
       venteOps.filter((op: any) => op.client_id).forEach((op: any) => {
@@ -698,7 +720,7 @@ export default function Admin({ profile }: AdminProps) {
       setUserToDelete(null);
       fetchUsers();
     } catch (err: any) {
-      alert('Erreur désactivation : ' + (err.message || String(err)));
+      toast.error('Erreur désactivation : ' + (err.message || String(err)));
     } finally {
       setDeletingUser(false);
     }
@@ -943,8 +965,33 @@ export default function Admin({ profile }: AdminProps) {
                   </div>
                 </div>
 
-                {/* ── Row: PieChart catégories + PieChart paiements ──────────── */}
+                {/* ── Row: PieChart catégories + paiements + canal (F5) ──────── */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+                  {/* F5 — CA par Canal de Vente (Sur place / WhatsApp / Téléphone…) */}
+                  <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+                    <h4 className="text-sm font-black text-slate-700 mb-5">CA par Canal de Vente</h4>
+                    {canalCA.length === 0 ? (
+                      <p className="text-center text-slate-400 text-sm py-10">Aucune donnée</p>
+                    ) : (
+                      <ResponsiveContainer width="100%" height={Math.max(160, canalCA.length * 44)}>
+                        <BarChart layout="vertical" data={canalCA} margin={{ top: 5, right: 30, left: 0, bottom: 5 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" horizontal={false} />
+                          <XAxis type="number" tick={{ fontSize: 11, fill: '#94a3b8' }} tickFormatter={(v: number) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(v)} />
+                          <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 11, fontWeight: 700, fill: '#64748b' }} />
+                          <Tooltip
+                            formatter={(value: any) => [`${Number(value).toLocaleString('fr-MA')} DH`, 'CA']}
+                            contentStyle={{ borderRadius: '12px', border: '1px solid #e2e8f0', fontSize: '12px', fontWeight: 700 }}
+                          />
+                          <Bar dataKey="value" radius={[0, 4, 4, 0] as [number, number, number, number]}>
+                            {canalCA.map((_, i) => (
+                              <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
 
                   {/* PieChart — CA par catégorie */}
                   <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">

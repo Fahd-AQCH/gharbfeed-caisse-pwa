@@ -24,6 +24,7 @@ import {
   Inbox,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { toast, askConfirm } from '../lib/notify';
 
 interface SyncHubProps {
   profile: UserProfile | null;
@@ -84,7 +85,7 @@ export default function SyncHub({ profile: _profile }: SyncHubProps) {
       await syncAll();
       setLastSync(getLastSyncAt());
     } catch (err) {
-      alert('Erreur de synchronisation : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur de synchronisation : ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setSyncing(false);
     }
@@ -94,8 +95,8 @@ export default function SyncHub({ profile: _profile }: SyncHubProps) {
     setRefreshingCatalog(true);
     try {
       const res = await pullMasterData();
-      if (!res.success) alert('Rafraîchissement impossible : ' + (res.error || 'inconnu'));
-      else setLastSync(getLastSyncAt());
+      if (!res.success) toast.error('Rafraîchissement impossible : ' + (res.error || 'inconnu'));
+      else { setLastSync(getLastSyncAt()); toast.success('Catalogue local rafraîchi.'); }
     } finally {
       setRefreshingCatalog(false);
     }
@@ -106,7 +107,7 @@ export default function SyncHub({ profile: _profile }: SyncHubProps) {
       await retryQueueItem(item.id!);
       setLastSync(getLastSyncAt());
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -115,17 +116,21 @@ export default function SyncHub({ profile: _profile }: SyncHubProps) {
       await retryAllFailed();
       setLastSync(getLastSyncAt());
     } catch (err) {
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
   const handleDelete = async (item: SyncQueueItem) => {
     const { label, detail } = summarizeItem(item);
-    if (!window.confirm(
-      `⚠ SUPPRIMER DÉFINITIVEMENT cet élément de la file ?\n\n${label} — ${detail}\n\n` +
-      `Cette opération n'a JAMAIS été envoyée au serveur : la supprimer = la perdre pour toujours.`
-    )) return;
+    const ok = await askConfirm({
+      title: 'Supprimer définitivement cet élément ?',
+      message: `${label} — ${detail}\n\nCette opération n'a JAMAIS été envoyée au serveur : la supprimer = la perdre pour toujours.`,
+      confirmLabel: 'Supprimer pour toujours',
+      danger: true,
+    });
+    if (!ok) return;
     await deleteQueueItem(item.id!);
+    toast.info('Élément supprimé de la file locale.');
   };
 
   return (

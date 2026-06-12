@@ -23,6 +23,9 @@ import { db } from '../../lib/db';
 
 interface SidebarProps {
   profile: UserProfile | null;
+  /** Drawer mobile (U4) : ouvert/fermé — sans effet ≥ lg où la sidebar est fixe */
+  mobileOpen?: boolean;
+  onClose?: () => void;
 }
 
 const menuItems = [
@@ -39,7 +42,7 @@ const menuItems = [
   { path: '/admin', label: 'Administration', icon: Settings, roles: ['admin'] },
 ];
 
-export default function Sidebar({ profile }: SidebarProps) {
+export default function Sidebar({ profile, mobileOpen = false, onClose }: SidebarProps) {
   const navigate = useNavigate();
 
   // État réseau RÉEL (B1 — l'ancien panneau affichait « Connecté » en dur)
@@ -82,7 +85,22 @@ export default function Sidebar({ profile }: SidebarProps) {
   };
 
   return (
-    <aside className="w-64 bg-slate-900 flex flex-col shrink-0">
+    <>
+      {/* Overlay mobile — clic = fermeture du drawer */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-slate-900/60 backdrop-blur-sm lg:hidden"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+      )}
+      <aside className={cn(
+        'w-64 bg-slate-900 flex flex-col shrink-0',
+        // Mobile : drawer fixe glissant ; Desktop (lg+) : sidebar statique inchangée
+        'fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 ease-out',
+        'lg:static lg:translate-x-0 lg:z-auto',
+        mobileOpen ? 'translate-x-0' : '-translate-x-full'
+      )}>
       <div className="p-5 border-b border-slate-800">
         <div className="flex items-center space-x-3">
           <img
@@ -107,6 +125,7 @@ export default function Sidebar({ profile }: SidebarProps) {
             <NavLink
               key={item.path}
               to={item.path}
+              onClick={onClose}
               className={({ isActive }) =>
                 cn(
                   'flex items-center space-x-3 px-4 py-2.5 rounded-lg transition-colors group',
@@ -133,7 +152,7 @@ export default function Sidebar({ profile }: SidebarProps) {
 
       {/* Statut réseau RÉEL — cliquable vers le centre de synchronisation */}
       <button
-        onClick={() => navigate('/sync')}
+        onClick={() => { onClose?.(); navigate('/sync'); }}
         className="p-4 bg-slate-800/50 m-4 rounded-xl border border-slate-700 text-left hover:border-slate-500 transition-colors"
         title="Ouvrir le centre de synchronisation"
       >
@@ -162,6 +181,7 @@ export default function Sidebar({ profile }: SidebarProps) {
           <span>Déconnexion</span>
         </button>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

@@ -131,6 +131,9 @@ export interface DebtPayment {
   notes?: string;
   createdAt?: string;
   statut?: 'valide' | 'en_attente' | 'annule'; // workflow caissier → validation admin
+  validatedBy?: string;       // B11 — admin qui a tranché (validé/rejeté)
+  validatedByName?: string;
+  validatedAt?: string;
 }
 
 export interface PriceHistoryEntry {

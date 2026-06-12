@@ -7,6 +7,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
 import { pullMasterData } from '../lib/syncService';
 import { nowMaroc } from '../lib/serverTime';
+import { toast, askConfirm } from '../lib/notify';
 import {
   Package,
   Plus,
@@ -143,7 +144,7 @@ export default function Inventory({ profile }: InventoryProps) {
         const stockChanged =
           originalStockOnEdit !== null && newProduct.stockActual !== originalStockOnEdit;
         if (stockChanged && !isAdmin) {
-          alert('Seul un administrateur peut modifier le stock initial.');
+          toast.warning('Seul un administrateur peut modifier le stock initial.');
           return;
         }
         if (stockChanged && isAdmin && originalStockOnEdit !== null) {
@@ -222,7 +223,7 @@ export default function Inventory({ profile }: InventoryProps) {
       });
     } catch (err) {
       console.error(err);
-      alert("Erreur lors de l'enregistrement du produit: " + (err instanceof Error ? err.message : String(err)));
+      toast.error("Erreur lors de l'enregistrement du produit : " + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -249,17 +250,26 @@ export default function Inventory({ profile }: InventoryProps) {
   const handleToggleActive = async (product: Product) => {
     const newState = !product.isActive;
     const label = newState ? 'Réactiver' : 'Désactiver';
-    if (!window.confirm(`${label} le produit "${product.name}" ?`)) return;
+    const ok = await askConfirm({
+      title: `${label} « ${product.name} » ?`,
+      message: newState
+        ? 'Le produit réapparaîtra dans le catalogue et la caisse.'
+        : 'Le produit sera masqué du catalogue et de la caisse (historique conservé).',
+      confirmLabel: label,
+      danger: !newState,
+    });
+    if (!ok) return;
     try {
       const { error } = await supabase
         .from('produits')
         .update({ is_active: newState })
         .eq('code', product.code);
       if (error) throw error;
+      toast.success(`Produit « ${product.name} » ${newState ? 'réactivé' : 'désactivé'}.`);
       fetchData();
     } catch (err) {
       console.error(err);
-      alert('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+      toast.error('Erreur : ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
