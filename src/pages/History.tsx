@@ -197,6 +197,12 @@ export default function History({ profile }: HistoryProps) {
   const [priceHistory, setPriceHistory] = useState<any[]>([]);
   const [loadingPrix, setLoadingPrix] = useState(false);
 
+  // B10 — anti-troncature : pagination incrémentale (la limite fixe de 200
+  // faisait silencieusement disparaître les opérations anciennes)
+  const OPS_PAGE_SIZE = 200;
+  const [opsLimit, setOpsLimit] = useState(OPS_PAGE_SIZE);
+  const [opsHasMore, setOpsHasMore] = useState(false);
+
   const fetchOperations = useCallback(async () => {
     if (!profile?.id) return;
     setLoading(true);
@@ -213,7 +219,9 @@ export default function History({ profile }: HistoryProps) {
         .from('operations')
         .select('*')
         .order('num_op', { ascending: false })
-        .limit(200);
+        .limit(opsLimit);
+
+      setOpsHasMore((opsData?.length ?? 0) >= opsLimit);
 
       if (opsError) {
         setFetchError(`Erreur base de données : ${opsError.message}`);
@@ -321,7 +329,7 @@ export default function History({ profile }: HistoryProps) {
     } finally {
       setLoading(false);
     }
-  }, [profile?.id]);
+  }, [profile?.id, opsLimit]);
 
   useEffect(() => {
     if (!profile?.id) return;
@@ -535,7 +543,8 @@ export default function History({ profile }: HistoryProps) {
         type: op.type as 'vente' | 'achat',
         date: dateStr,
         time: timeStr,
-        cashierName: profile?.username,
+        // B7 — un ticket réimprimé porte l'agent D'ORIGINE, pas le lecteur actuel
+        cashierName: op.agentName || profile?.username,
         grossTotal: op.grossTotal,
         discountAmount: op.discountAmount ?? 0,
         finalTotal: op.finalTotal,
@@ -1008,6 +1017,16 @@ export default function History({ profile }: HistoryProps) {
                 </table>
               </div>
             </div>
+
+            {/* B10 — anti-troncature : pagination incrémentale */}
+            {!loading && opsHasMore && (
+              <button
+                onClick={() => setOpsLimit((l) => l + OPS_PAGE_SIZE)}
+                className="w-full py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold text-slate-500 hover:border-emerald-300 hover:text-emerald-600 transition-all"
+              >
+                Charger {OPS_PAGE_SIZE} opérations de plus…
+              </button>
+            )}
           </>
         )}
 

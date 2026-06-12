@@ -124,19 +124,10 @@ export default function App() {
             setProfile(cached);
             return;
           }
-          // Fallback for admin
-          if (session.user.email === 'aqch.fahd@gmail.com') {
-            setProfile({
-              id: session.user.id,
-              username: 'Administrator',
-              email: session.user.email,
-              roleId: 'admin',
-              isActive: true,
-              createdAt: new Date(),
-            });
-          } else {
-            setProfile(null);
-          }
+          // F3 (Sprint 3) : le fallback « admin par email hard-codé » est supprimé —
+          // aucun rôle ne doit JAMAIS être accordé sur la base d'une adresse email
+          // côté client. Sans profil ni cache → écran de reconnexion.
+          setProfile(null);
           return;
         }
 
@@ -149,6 +140,17 @@ export default function App() {
               : userData.actif !== undefined
               ? userData.actif
               : true;
+
+          // F3 (Sprint 3) : un compte désactivé est déconnecté DÈS que le serveur
+          // le confirme — la désactivation devient rétroactive sur session active
+          if (!isActive) {
+            console.warn('[App] compte désactivé — déconnexion forcée');
+            try { localStorage.removeItem(PROFILE_CACHE_KEY); } catch { /* noop */ }
+            await supabase.auth.signOut();
+            setUser(null);
+            setProfile(null);
+            return;
+          }
 
           const builtProfile = {
             id: userData.id,
@@ -208,6 +210,14 @@ export default function App() {
               const rawRole = userData.role_id || userData.role || 'caissier';
               const roleId = rawRole === 'admin' ? 'admin' : rawRole === 'tresorier' ? 'tresorier' : 'cashier';
               const isActive = userData.is_active !== undefined ? userData.is_active : userData.actif !== undefined ? userData.actif : true;
+              // F3 — désactivation rétroactive sur session déjà ouverte
+              if (!isActive) {
+                console.warn('[App] compte désactivé — déconnexion forcée');
+                try { localStorage.removeItem(PROFILE_CACHE_KEY); } catch { /* noop */ }
+                supabase.auth.signOut();
+                setProfile(null);
+                return;
+              }
               const refreshedProfile = {
                 id: userData.id,
                 username: userData.nom || userData.username || session.user.email?.split('@')[0] || 'Utilisateur',

@@ -216,6 +216,8 @@ export default function Debts({ profile }: DebtsProps) {
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [historyClientSearch, setHistoryClientSearch] = useState('');
   const [historyExpandedId, setHistoryExpandedId] = useState<number | null>(null);
+  // STRICT (Sprint 3) : filtre 3 états identique aux Crédits Fournisseurs
+  const [historyStatutFilter, setHistoryStatutFilter] = useState<'all' | 'encours' | 'solde'>('all');
 
   // ── Payment modal ───────────────────────────────────────────────────────────
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -358,6 +360,22 @@ export default function Debts({ profile }: DebtsProps) {
     }
   }, [todayStr]);
 
+  // STRICT (Sprint 3) : l'historique ne montre QUE les ventes ayant impliqué
+  // une dette (ventes à crédit) — en cours OU soldées. Les ventes payées
+  // comptant à la création n'ont rien à faire ici.
+  // Discriminants : reste dû > 0, échéance posée (obligatoire pour tout crédit),
+  // statut Partiel / Non payé, ou montant payé < total.
+  const isDebtRelated = (op: DebtOp): boolean =>
+    op.resteAPayer > 0.01 ||
+    !!op.dateEcheance ||
+    op.statutPaiement === 'Partiel' ||
+    op.statutPaiement === 'Non payé' ||
+    op.montantPaye < op.totalDh - 0.009;
+
+  const HISTORY_PAGE_SIZE = 300;
+  const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE_SIZE);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+
   const fetchDebtHistory = useCallback(async () => {
     if (historyLoaded) return;
     setHistoryLoading(true);
@@ -367,18 +385,26 @@ export default function Debts({ profile }: DebtsProps) {
         .select('*')
         .in('type_op', ['vente'])
         .eq('statut', 'valide')
-        .not('statut_paiement', 'is', null)
         .order('num_op', { ascending: false })
-        .limit(500);
+        .limit(historyLimit);
       if (error) throw error;
-      setDebtHistory(await enrichOps(opsData || []));
+      const rows = opsData || [];
+      // B10 : s'il y a exactement `limit` lignes, il en reste probablement d'autres
+      setHistoryHasMore(rows.length >= historyLimit);
+      const enriched = await enrichOps(rows);
+      setDebtHistory(enriched.filter(isDebtRelated));
       setHistoryLoaded(true);
     } catch (err) {
       console.error('[Debts] fetchDebtHistory:', err);
     } finally {
       setHistoryLoading(false);
     }
-  }, [historyLoaded, todayStr]);
+  }, [historyLoaded, historyLimit, todayStr]);
+
+  const loadMoreHistory = () => {
+    setHistoryLimit((l) => l + HISTORY_PAGE_SIZE);
+    setHistoryLoaded(false); // déclenche un refetch avec la limite élargie
+  };
 
   useEffect(() => { fetchDebts(); }, [fetchDebts]);
 
@@ -627,10 +653,14 @@ export default function Debts({ profile }: DebtsProps) {
     .slice(0, 5);
 
   const filteredHistory = debtHistory.filter((d) => {
+    if (historyStatutFilter === 'encours' && d.resteAPayer <= 0.01) return false;
+    if (historyStatutFilter === 'solde' && d.resteAPayer > 0.01) return false;
     if (!historyClientSearch.trim()) return true;
     const q = historyClientSearch.toLowerCase();
     return (d.clientName || '').toLowerCase().includes(q) || d.operationNumber.toLowerCase().includes(q);
   });
+  const nbHistoryEncours = debtHistory.filter((d) => d.resteAPayer > 0.01).length;
+  const nbHistorySoldes = debtHistory.length - nbHistoryEncours;
 
   const totalDu = debtOps.reduce((s, d) => s + d.resteAPayer, 0);
   const nbOverdue = debtOps.filter((d) => d.isOverdue).length;
@@ -1544,18 +1574,41 @@ export default function Debts({ profile }: DebtsProps) {
           );
         })()}
 
-        {/* ── TAB 3: Full history ── */}
+        {/* ── TAB 3: Historique des DETTES (ventes à crédit uniquement) ── */}
         {activeTab === 'historique' && (
           <>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Filtrer par client..."
-                className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-rose-500/10 transition-all"
-                value={historyClientSearch}
-                onChange={(e) => setHistoryClientSearch(e.target.value)}
-              />
+            <div className="flex flex-col lg:flex-row gap-3">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Filtrer par client ou numéro d'opération..."
+                  className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-10 pr-4 text-sm font-medium focus:ring-2 focus:ring-rose-500/10 transition-all"
+                  value={historyClientSearch}
+                  onChange={(e) => setHistoryClientSearch(e.target.value)}
+                />
+              </div>
+              {/* Filtre statut — même UX que Crédits Fournisseurs */}
+              <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-xl px-2 py-1.5">
+                {([
+                  { key: 'all',     label: `Tous (${debtHistory.length})` },
+                  { key: 'encours', label: `En cours (${nbHistoryEncours})` },
+                  { key: 'solde',   label: `Soldés (${nbHistorySoldes})` },
+                ] as { key: 'all' | 'encours' | 'solde'; label: string }[]).map((f) => (
+                  <button
+                    key={f.key}
+                    onClick={() => setHistoryStatutFilter(f.key)}
+                    className={cn(
+                      'px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all',
+                      historyStatutFilter === f.key
+                        ? f.key === 'solde' ? 'bg-emerald-500 text-white' : f.key === 'encours' ? 'bg-orange-500 text-white' : 'bg-rose-500 text-white'
+                        : 'text-slate-500 hover:bg-slate-50'
+                    )}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {historyLoading ? (
@@ -1579,6 +1632,16 @@ export default function Debts({ profile }: DebtsProps) {
                   />
                 ))}
               </div>
+            )}
+
+            {/* B10 — anti-troncature : pagination incrémentale */}
+            {!historyLoading && historyHasMore && (
+              <button
+                onClick={loadMoreHistory}
+                className="w-full py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold text-slate-500 hover:border-rose-300 hover:text-rose-600 transition-all"
+              >
+                Charger {HISTORY_PAGE_SIZE} opérations de plus…
+              </button>
             )}
           </>
         )}

@@ -102,7 +102,7 @@ export default function Sidebar({ profile, mobileOpen = false, onClose }: Sideba
         'lg:static lg:translate-x-0 lg:z-auto',
         mobileOpen ? 'translate-x-0' : '-translate-x-full'
       )}>
-      <div className="p-5 border-b border-slate-800">
+      <div className="p-5 border-b border-slate-800 shrink-0">
         <div className="flex items-center space-x-3">
           <img
             src={logo}
@@ -120,7 +120,9 @@ export default function Sidebar({ profile, mobileOpen = false, onClose }: Sideba
         </div>
       </div>
 
-      <nav className="flex-1 py-4">
+      {/* STRICT (Sprint 3) : le menu défile sur petits écrans — le bouton
+          Déconnexion (shrink-0, en bas) reste TOUJOURS atteignable */}
+      <nav className="flex-1 min-h-0 overflow-y-auto overscroll-contain py-4">
         <div className="px-4 space-y-1">
           {filteredMenu.map((item) => {
             // HOTFIX — MODE POS STRICT hors-ligne : seules la Caisse (Dexie) et la
@@ -174,7 +176,7 @@ export default function Sidebar({ profile, mobileOpen = false, onClose }: Sideba
       {/* Statut réseau RÉEL — cliquable vers le centre de synchronisation */}
       <button
         onClick={() => { onClose?.(); navigate('/sync'); }}
-        className="p-4 bg-slate-800/50 m-4 rounded-xl border border-slate-700 text-left hover:border-slate-500 transition-colors"
+        className="p-4 bg-slate-800/50 m-4 rounded-xl border border-slate-700 text-left hover:border-slate-500 transition-colors shrink-0"
         title="Ouvrir le centre de synchronisation"
       >
         <div className="text-xs text-slate-400 uppercase tracking-widest font-bold mb-2">

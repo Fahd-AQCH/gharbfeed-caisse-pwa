@@ -21,6 +21,7 @@ import {
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast, askConfirm } from '../lib/notify';
+import { db } from '../lib/db';
 
 interface FournisseursProps {
   profile: UserProfile | null;
@@ -212,9 +213,27 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
           .update(payload)
           .eq('id_fournisseur', editingId);
         if (error) throw error;
+        // B9 — Dexie à jour immédiatement (sélecteur caisse mode achat)
+        await db.fournisseurs.update(editingId, {
+          nom: payload.nom,
+          type: payload.type ?? null,
+          num_telephone: payload.num_telephone ?? null,
+        }).catch(() => {});
       } else {
-        const { error } = await supabase.from('fournisseurs').insert(payload);
+        const { data: inserted, error } = await supabase
+          .from('fournisseurs')
+          .insert(payload)
+          .select('id_fournisseur')
+          .single();
         if (error) throw error;
+        if (inserted?.id_fournisseur != null) {
+          await db.fournisseurs.put({
+            id_fournisseur: inserted.id_fournisseur,
+            nom: payload.nom,
+            type: payload.type ?? null,
+            num_telephone: payload.num_telephone ?? null,
+          }).catch(() => {});
+        }
       }
 
       setShowModal(false);
@@ -241,6 +260,7 @@ export default function Fournisseurs({ profile }: FournisseursProps) {
         .delete()
         .eq('id_fournisseur', id);
       if (error) throw error;
+      await db.fournisseurs.delete(id).catch(() => {});
       toast.success(`Fournisseur « ${nom} » supprimé.`);
       fetchFournisseurs();
     } catch (err) {

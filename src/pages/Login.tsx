@@ -19,10 +19,11 @@ export default function Login() {
       .single();
 
     if (error || !profile) {
-      // Profil absent : on tente un auto-insert de secours sans déconnecter
+      // Profil absent : auto-insert de secours en CAISSIER uniquement.
+      // F3 (Sprint 3) : plus AUCUN rôle accordé sur la base d'une adresse email —
+      // un admin se crée exclusivement depuis l'onglet Utilisateurs par un admin.
       const username = user.email.split('@')[0];
-      const isAdmin = user.email === 'aqch.fahd@gmail.com';
-      const roleValue = isAdmin ? 'admin' : 'caissier';
+      const roleValue = 'caissier';
 
       // Essai 1 : colonnes is_active + role_id
       let res = await supabase.from('utilisateurs').insert({
@@ -44,18 +45,12 @@ export default function Login() {
       }
 
       if (res.error) {
-        // L'insert a échoué (RLS bloqué ou colonnes différentes)
-        // On n'appelle PAS signOut() pour éviter la boucle infinie.
-        // App.tsx prendra le relais via onAuthStateChange et affichera le fallback admin si besoin.
         console.error('Profil auto-insert failed (RLS ou schéma):', res.error);
         setError(
           `Profil introuvable ou bloqué par RLS. Contactez l'administrateur.\n` +
           `(Détail : ${res.error.message})`
         );
-        // Déconnexion propre uniquement si ce n'est pas l'admin connu
-        if (!isAdmin) {
-          await supabase.auth.signOut();
-        }
+        await supabase.auth.signOut();
       }
       // Si l'insert réussit, onAuthStateChange dans App.tsx gérera la suite
     } else {

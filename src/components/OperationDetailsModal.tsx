@@ -191,7 +191,8 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
       type: (operation.type === 'retour_client' ? 'vente' : operation.type) as 'vente' | 'achat',
       date: dateStr,
       time: timeStr,
-      cashierName: profile?.username,
+      // B7 — un ticket réimprimé porte l'agent D'ORIGINE, pas le lecteur actuel
+      cashierName: operation.agentName || profile?.username,
       grossTotal,
       discountAmount: operation.discountAmount ?? 0,
       finalTotal,

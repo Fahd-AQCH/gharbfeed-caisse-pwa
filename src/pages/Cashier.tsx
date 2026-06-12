@@ -558,6 +558,10 @@ export default function Cashier({ profile }: CashierProps) {
     );
   };
 
+  // B8 — retours OFFLINE-FIRST : même canal que les ventes (commitOperation).
+  // Hors-ligne, le retour part en file avec un id OFF-xxx ; au push, la RPC
+  // commit_operation insère l'opération et le stock est recrédité (branche
+  // retour_client du push). En ligne, comportement identique à avant.
   const handleCreateReturn = async () => {
     const toReturn = returnItems.filter((i) => i.returnQty > 0.001);
     if (!toReturn.length) { toast.warning('Sélectionnez au moins un article à retourner.'); return; }
@@ -566,44 +570,39 @@ export default function Cashier({ profile }: CashierProps) {
       const { date: todayStr, heure: timeStr } = nowMaroc();
       const total = toReturn.reduce((s, i) => s + i.returnQty * i.unitPrice, 0);
 
-      const { data: returnOp, error: opErr } = await supabase
-        .from('operations')
-        .insert({
-          date_op: todayStr,
-          heure_op: timeStr,
-          type_op: 'retour_client',
-          total_dh: total,
-          remise_dh: 0,
-          utilisateur_id: profile?.id,
-          client_id: selectedReturnOp.client_id ?? null,
-          statut: 'valide',
-          condition_paiement: 'Espèce',
-          parent_op_id: selectedReturnOp.num_op,
-          observ: `Retour sur OP-${String(selectedReturnOp.num_op).padStart(4, '0')}`,
-        })
-        .select()
-        .single();
-      if (opErr) throw opErr;
+      const header: Record<string, unknown> = {
+        date_op: todayStr,
+        heure_op: timeStr,
+        type_op: 'retour_client',
+        total_dh: total,
+        remise_dh: 0,
+        utilisateur_id: profile?.id,
+        client_id: selectedReturnOp.client_id ?? null,
+        statut: 'valide',
+        condition_paiement: 'Espèce',
+        parent_op_id: selectedReturnOp.num_op,
+        observ: `Retour sur OP-${String(selectedReturnOp.num_op).padStart(4, '0')}`,
+      };
+      const itemRows = toReturn.map((i) => ({
+        produit_id: i.productId,
+        quantite: i.returnQty,
+        prix_unitaire: i.unitPrice,
+        total_ligne: i.returnQty * i.unitPrice,
+      }));
 
-      const { error: itemsErr } = await supabase.from('operation_items').insert(
-        toReturn.map((i) => ({
-          operation_id: returnOp.num_op,
-          produit_id: i.productId,
-          quantite: i.returnQty,
-          prix_unitaire: i.unitPrice,
-          total_ligne: i.returnQty * i.unitPrice,
-        }))
-      );
-      if (itemsErr) throw itemsErr;
+      const { numOp, queued } = await commitOperation(header, itemRows);
 
-      // Restock products individually (fail-safe per-item, RPC atomique)
-      for (const item of toReturn) {
-        const { error: rpcErr } = await supabase.rpc('apply_stock_delta', {
-          p_code: item.productId,
-          p_delta_stock: item.returnQty,
-          p_delta_qte_vente: -item.returnQty,
-        });
-        if (rpcErr) console.error(`[Cashier] restock ${item.productId}:`, rpcErr.message);
+      // Restock serveur immédiat UNIQUEMENT en ligne — hors-ligne, c'est la
+      // branche retour_client du push (stockApplied) qui s'en charge.
+      if (!queued) {
+        for (const item of toReturn) {
+          const { error: rpcErr } = await supabase.rpc('apply_stock_delta', {
+            p_code: item.productId,
+            p_delta_stock: item.returnQty,
+            p_delta_qte_vente: -item.returnQty,
+          });
+          if (rpcErr) console.error(`[Cashier] restock ${item.productId}:`, rpcErr.message);
+        }
       }
 
       // Optimistic Dexie update — useLiveQuery propagates the change to the UI
@@ -621,7 +620,12 @@ export default function Cashier({ profile }: CashierProps) {
       setReturnSearchResults([]);
       setSelectedReturnOp(null);
       setReturnItems([]);
-      toast.success(`Retour OP-${String(returnOp.num_op).padStart(4, '0')} créé avec succès. Stock recrédité.`);
+      const opLabel = typeof numOp === 'number' ? `OP-${String(numOp).padStart(4, '0')}` : String(numOp);
+      if (queued) {
+        toast.info(`📶 Retour ${opLabel} sauvegardé localement — stock serveur recrédité à la synchronisation.`);
+      } else {
+        toast.success(`Retour ${opLabel} créé avec succès. Stock recrédité.`);
+      }
     } catch (err: any) {
       toast.error('Erreur retour : ' + (err.message || String(err)));
     } finally {

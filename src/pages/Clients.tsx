@@ -5,6 +5,7 @@ import { Users, Plus, Search, User, Phone, MapPin, Briefcase, Edit2, X, Loader2,
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast, askConfirm } from '../lib/notify';
+import { db } from '../lib/db';
 
 interface ClientAccount {
   clientId: number;
@@ -114,16 +115,34 @@ export default function Clients({ profile }: ClientsProps) {
           })
           .eq('id_client', parseInt(editingClientId));
         if (error) throw error;
+        // B9 — Dexie à jour immédiatement (sélecteur caisse cohérent sans attendre un pull)
+        await db.clients.update(parseInt(editingClientId), {
+          nom_prenom: newClient.name,
+          num_telephone: newClient.phone || null,
+          fonction: newClient.function || null,
+        }).catch(() => {});
       } else {
-        const { error } = await supabase
+        const { data: inserted, error } = await supabase
           .from('clients')
           .insert({
             nom_prenom: newClient.name,
             num_telephone: newClient.phone,
             adresse: newClient.address,
             fonction: newClient.function
-          });
+          })
+          .select('id_client')
+          .single();
         if (error) throw error;
+        // B9 — le nouveau client apparaît dans la caisse sans attendre un pull
+        if (inserted?.id_client != null) {
+          await db.clients.put({
+            id_client: inserted.id_client,
+            nom_prenom: newClient.name,
+            num_telephone: newClient.phone || null,
+            fonction: newClient.function || null,
+            actif: true,
+          }).catch(() => {});
+        }
       }
       setShowAddModal(false);
       setEditingClientId(null);
@@ -153,6 +172,8 @@ export default function Clients({ profile }: ClientsProps) {
         .update({ actif: target })
         .eq('id_client', parseInt(client.id));
       if (error) throw error;
+      // B9 — propagation immédiate au sélecteur caisse (qui filtre actif)
+      await db.clients.update(parseInt(client.id), { actif: target }).catch(() => {});
       toast.success(target ? `Client « ${client.name} » réactivé.` : `Client « ${client.name} » désactivé.`);
       fetchClients();
     } catch (err) {
@@ -184,6 +205,7 @@ export default function Clients({ profile }: ClientsProps) {
         .delete()
         .eq('id_client', parseInt(client.id));
       if (error) throw error;
+      await db.clients.delete(parseInt(client.id)).catch(() => {});
       toast.success(`Client « ${client.name} » supprimé définitivement.`);
       fetchClients();
     } catch (err) {
