@@ -4,7 +4,7 @@ import { supabase } from '../supabase';
 import { generateTicketPDF, TicketItem, TicketOperation } from '../utils/pdfGenerator';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
-import { commitOperation, syncAll } from '../lib/syncService';
+import { commitOperation, syncAll, enqueueMasterRecord } from '../lib/syncService';
 import { nowMaroc } from '../lib/serverTime';
 import { toast } from '../lib/notify';
 
@@ -149,69 +149,96 @@ export default function Cashier({ profile }: CashierProps) {
   const [quickClientLoading, setQuickClientLoading] = useState(false);
 
   // ── Création rapide d'un client depuis la caisse ───────────────────────
+  // HOTFIX offline : hors-ligne (ou réseau menteur), le client est créé
+  // LOCALEMENT avec un id temporaire NÉGATIF + mis en file prioritaire.
+  // Le push le synchronise AVANT les ventes qui le référencent (graphe FK).
   const handleCreateQuickClient = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!quickClientName.trim()) return;
     setQuickClientLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('clients')
-        .insert({
-          nom_prenom: quickClientName.trim(),
-          num_telephone: quickClientPhone.trim() || null,
-          adresse: quickClientAddress.trim() || null,
-          fonction: quickClientFonction || null,
-        })
-        .select()
-        .single();
-      if (error) throw error;
-      // Also add to Dexie so useLiveQuery picks it up immediately
-      await db.clients.put({ id_client: data.id_client, nom_prenom: data.nom_prenom, num_telephone: data.num_telephone ?? null, fonction: data.fonction ?? null });
-      const newClient = {
-        id: data.id_client.toString(),
-        name: data.nom_prenom,
-        phone: data.num_telephone || '',
-        address: data.adresse || '',
-        function: data.fonction || '',
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      } as Client;
-      setSelectedClient(newClient);
+
+    const record = {
+      nom_prenom: quickClientName.trim(),
+      num_telephone: quickClientPhone.trim() || null,
+      adresse: quickClientAddress.trim() || null,
+      fonction: quickClientFonction || null,
+    };
+
+    const resetForm = () => {
       setQuickClientName('');
       setQuickClientPhone('');
       setQuickClientAddress('');
       setQuickClientFonction('');
       setShowQuickClient(false);
+    };
+
+    const selectClient = (id: number) => {
+      setSelectedClient({
+        id: String(id),
+        name: record.nom_prenom,
+        phone: record.num_telephone || '',
+        address: record.adresse || '',
+        function: record.fonction || '',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as Client);
+    };
+
+    const createLocally = async () => {
+      const tempId = -Date.now(); // négatif → jamais en collision avec un serial Postgres
+      await db.clients.put({ id_client: tempId, nom_prenom: record.nom_prenom, num_telephone: record.num_telephone, fonction: record.fonction, actif: true });
+      await enqueueMasterRecord('client', tempId, record);
+      selectClient(tempId);
+      resetForm();
+      toast.info(`Client « ${record.nom_prenom} » créé localement — synchronisé au retour du réseau.`);
+    };
+
+    try {
+      if (!navigator.onLine) {
+        await createLocally();
+        return;
+      }
+      const { data, error } = await supabase
+        .from('clients')
+        .insert(record)
+        .select()
+        .single();
+      if (error) throw error;
+      // Also add to Dexie so useLiveQuery picks it up immediately
+      await db.clients.put({ id_client: data.id_client, nom_prenom: data.nom_prenom, num_telephone: data.num_telephone ?? null, fonction: data.fonction ?? null, actif: true });
+      selectClient(data.id_client);
+      resetForm();
     } catch (err: any) {
-      toast.error('Erreur création client : ' + (err.message || String(err)));
+      // navigator.onLine mentait → bascule en création locale au lieu de bloquer la vente
+      if (/failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(err.message || '')) {
+        await createLocally();
+      } else {
+        toast.error('Erreur création client : ' + (err.message || String(err)));
+      }
     } finally {
       setQuickClientLoading(false);
     }
   };
 
   // ── Création rapide d'un fournisseur depuis la caisse ───────────────────
+  // HOTFIX offline : même mécanique que les clients (id temporaire négatif
+  // + file prioritaire, synchronisé avant les achats qui le référencent).
   const handleCreateQuickFournisseur = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!quickFournisseurNom.trim()) return;
     setQuickFournisseurLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('fournisseurs')
-        .insert({
-          type: quickFournisseurType,
-          nom: quickFournisseurNom.trim(),
-          num_telephone: quickFournisseurTel.trim() || null,
-          adresse: quickFournisseurAdresse.trim() || null,
-          irc: quickFournisseurIrc.trim() || null,
-          ice: quickFournisseurIce.trim() || null,
-          cin: quickFournisseurCin.trim() || null,
-        })
-        .select()
-        .single();
-      if (error) throw error;
-      // Also add to Dexie so useLiveQuery picks it up immediately
-      await db.fournisseurs.put({ id_fournisseur: data.id_fournisseur, nom: data.nom, type: data.type ?? null, num_telephone: data.num_telephone ?? null });
-      setSelectedFournisseur(data);
+
+    const record = {
+      type: quickFournisseurType,
+      nom: quickFournisseurNom.trim(),
+      num_telephone: quickFournisseurTel.trim() || null,
+      adresse: quickFournisseurAdresse.trim() || null,
+      irc: quickFournisseurIrc.trim() || null,
+      ice: quickFournisseurIce.trim() || null,
+      cin: quickFournisseurCin.trim() || null,
+    };
+
+    const resetForm = () => {
       setQuickFournisseurNom('');
       setQuickFournisseurTel('');
       setQuickFournisseurAdresse('');
@@ -220,8 +247,38 @@ export default function Cashier({ profile }: CashierProps) {
       setQuickFournisseurCin('');
       setQuickFournisseurType('Personne physique');
       setShowQuickFournisseur(false);
+    };
+
+    const createLocally = async () => {
+      const tempId = -Date.now();
+      await db.fournisseurs.put({ id_fournisseur: tempId, nom: record.nom, type: record.type, num_telephone: record.num_telephone });
+      await enqueueMasterRecord('fournisseur', tempId, record);
+      setSelectedFournisseur({ id_fournisseur: tempId, nom: record.nom, type: record.type, num_telephone: record.num_telephone });
+      resetForm();
+      toast.info(`Fournisseur « ${record.nom} » créé localement — synchronisé au retour du réseau.`);
+    };
+
+    try {
+      if (!navigator.onLine) {
+        await createLocally();
+        return;
+      }
+      const { data, error } = await supabase
+        .from('fournisseurs')
+        .insert(record)
+        .select()
+        .single();
+      if (error) throw error;
+      // Also add to Dexie so useLiveQuery picks it up immediately
+      await db.fournisseurs.put({ id_fournisseur: data.id_fournisseur, nom: data.nom, type: data.type ?? null, num_telephone: data.num_telephone ?? null });
+      setSelectedFournisseur(data);
+      resetForm();
     } catch (err: any) {
-      toast.error('Erreur création fournisseur : ' + (err.message || String(err)));
+      if (/failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(err.message || '')) {
+        await createLocally();
+      } else {
+        toast.error('Erreur création fournisseur : ' + (err.message || String(err)));
+      }
     } finally {
       setQuickFournisseurLoading(false);
     }

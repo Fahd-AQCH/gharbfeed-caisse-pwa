@@ -33,6 +33,16 @@ interface SyncHubProps {
 // Résumé lisible d'un élément de file (le payload est du JSON brut)
 function summarizeItem(item: SyncQueueItem): { label: string; detail: string } {
   try {
+    // Fiches maîtres créées hors-ligne (synchronisées AVANT les opérations)
+    if (item.type === 'client' || item.type === 'fournisseur') {
+      const { record } = JSON.parse(item.payload) as { record: Record<string, unknown> };
+      const nom = String(record?.nom_prenom ?? record?.nom ?? '—');
+      return {
+        label: item.type === 'client' ? 'Nouveau client' : 'Nouveau fournisseur',
+        detail: `${nom}${record?.num_telephone ? ` · ${record.num_telephone}` : ''} · sera synchronisé en priorité`,
+      };
+    }
+
     const { header, items } = JSON.parse(item.payload) as {
       header: Record<string, unknown>;
       items: unknown[];

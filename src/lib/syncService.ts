@@ -137,6 +137,10 @@ export async function pushPendingOperations(): Promise<{
     return result;
   }
 
+  // Récupère les items restés bloqués en 'processing' (crash / refresh pendant
+  // un push précédent) — sinon ils deviennent invisibles pour toujours.
+  await db.sync_queue.where('status').equals('processing').modify({ status: 'pending' });
+
   const pendingItems = await db.sync_queue
     .where('status')
     .equals('pending')
@@ -144,7 +148,15 @@ export async function pushPendingOperations(): Promise<{
 
   if (pendingItems.length === 0) return result;
 
-  console.info(`[Sync] pushing ${pendingItems.length} queued operation(s)…`);
+  // ── GRAPHE DE DÉPENDANCES : les fiches maîtres (clients/fournisseurs créés
+  //    hors-ligne) passent AVANT les opérations qui les référencent — sinon
+  //    violation FK garantie. Chronologique à l'intérieur de chaque groupe.
+  const TYPE_PRIORITY: Record<string, number> = { client: 0, fournisseur: 0, operation: 1, retour_client: 1 };
+  pendingItems.sort((a, b) =>
+    (TYPE_PRIORITY[a.type] ?? 1) - (TYPE_PRIORITY[b.type] ?? 1) || a.createdAt - b.createdAt
+  );
+
+  console.info(`[Sync] pushing ${pendingItems.length} queued item(s)…`);
 
   for (const item of pendingItems) {
     // Mark as processing to avoid double-submit if called concurrently
@@ -153,53 +165,36 @@ export async function pushPendingOperations(): Promise<{
     try {
       const payload = JSON.parse(item.payload);
 
-      if (item.type === 'operation' || item.type === 'retour_client') {
+      if (item.type === 'client' || item.type === 'fournisseur') {
+        // ── Fiche maître créée hors-ligne : insertion + résolution de l'id réel
+        //    + réécriture des opérations en file qui pointent l'id temporaire.
+        await pushMasterRecord(item, payload as MasterRecordPayload);
+      } else if (item.type === 'operation' || item.type === 'retour_client') {
         // Each queued payload contains { header, items }
         const { header, items } = payload as {
           header: Record<string, unknown>;
           items: Record<string, unknown>[];
         };
 
-        // ── Idempotence : si un retry précédent a déjà inséré ce header,
-        //    on le retrouve via son id_op (UUID généré côté client à l'enqueue)
-        //    au lieu de créer un doublon.
-        let parentId: number | null = null;
-        if (header.id_op) {
-          const { data: existing, error: findErr } = await supabase
-            .from('operations')
-            .select('num_op')
-            .eq('id_op', header.id_op as string)
-            .maybeSingle();
-          if (findErr) throw new Error(findErr.message);
-          if (existing) parentId = (existing as any).num_op;
+        // Garde : une opération qui référence encore un id temporaire (négatif)
+        // ne doit JAMAIS partir — la fiche maître correspondante a échoué plus
+        // haut dans ce même push. Erreur claire, retry au prochain cycle.
+        if ((typeof header.client_id === 'number' && (header.client_id as number) < 0) ||
+            (typeof header.fournisseur_id === 'number' && (header.fournisseur_id as number) < 0)) {
+          throw new Error('Dépendance non résolue : le client/fournisseur créé hors-ligne n\'est pas encore synchronisé.');
         }
 
-        if (parentId == null) {
-          const { data: newOp, error: opErr } = await supabase
-            .from('operations')
-            .insert(header)
-            .select()
-            .single();
-          if (opErr) throw new Error(opErr.message);
-          parentId = (newOp as any).num_op;
-        }
-
-        // Insert operation items with resolved operation_id (skip si déjà présents — retry-safe)
-        if (items.length > 0) {
-          const { count: existingItems, error: cntErr } = await supabase
-            .from('operation_items')
-            .select('id', { count: 'exact', head: true })
-            .eq('operation_id', parentId);
-          if (cntErr) throw new Error(cntErr.message);
-
-          if (!existingItems) {
-            const itemRows = items.map((i) => ({ ...i, operation_id: parentId }));
-            const { error: itemsErr } = await supabase
-              .from('operation_items')
-              .insert(itemRows);
-            if (itemsErr) throw new Error(itemsErr.message);
-          }
-        }
+        // ── RPC commit_operation : pré-contrôles FK + idempotence id_op +
+        //    en-tête + lignes en UNE transaction serveur. Un refus (client
+        //    supprimé, produit disparu, doublon) lève une erreur claire SANS
+        //    consommer le numéro séquentiel → plus de trous comptables.
+        const { data: commitRes, error: commitErr } = await supabase.rpc('commit_operation', {
+          p_header: header,
+          p_items: items,
+        });
+        if (commitErr) throw new Error(commitErr.message);
+        const parentId = Number((commitRes as any)?.num_op);
+        if (!Number.isFinite(parentId)) throw new Error('commit_operation : num_op manquant dans la réponse');
 
         // ── STOCK CENTRAL : applique les deltas des opérations hors-ligne.
         //    Ventes validées → stock −qté ; retours client → stock +qté.
@@ -257,8 +252,10 @@ export async function pushPendingOperations(): Promise<{
 /**
  * The single entry-point for creating an operation from the Cashier.
  *
- * - ONLINE  → inserts directly into Supabase (returns the real `num_op`)
- * - OFFLINE → queues the payload in Dexie sync_queue (returns a local `LOC-XXXXXX` id)
+ * - ONLINE  → RPC `commit_operation` (atomique, anti-brûlage de séquence)
+ * - OFFLINE → file Dexie sync_queue, id local temporaire `OFF-XXXXXXXX`.
+ *   Le numéro séquentiel OP-XXXX n'est attribué QUE par la RPC lors de
+ *   l'insertion finale réussie — plus de trous dans la numérotation.
  *
  * The caller uses the returned id for the PDF ticket regardless of the path.
  */
@@ -268,38 +265,38 @@ export async function commitOperation(
 ): Promise<{ numOp: number | string; queued: boolean }> {
 
   // id_op généré côté client SUR LES DEUX CHEMINS = clé d'idempotence du push.
-  // Même un échec online PARTIEL (header inséré, lignes en échec réseau) peut être
-  // mis en file sans risque : le push retrouvera le header par id_op et ne créera
-  // ni doublon d'opération ni double stock.
+  // Même un échec online PARTIEL peut être mis en file sans risque : la RPC
+  // retrouvera l'opération par id_op et ne créera ni doublon ni double stock.
   const headerWithId = { id_op: crypto.randomUUID(), ...header };
 
   const enqueueFallback = async (reason: string) => {
     await enqueueOperation('operation', headerWithId, items);
-    const localId = `LOC-${Date.now().toString().slice(-6)}`;
+    // Id TEMPORAIRE local — le vrai numéro séquentiel sera attribué par la RPC
+    const localId = `OFF-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
     console.warn(`[Sync] commitOperation — ${reason}, enqueued as ${localId}`);
     return { numOp: localId, queued: true as const };
   };
 
-  if (!isOnline()) {
-    return enqueueFallback('offline');
+  // Une opération qui référence un client/fournisseur créé hors-ligne (id négatif)
+  // passe DIRECTEMENT en file : le push synchronisera la fiche maître d'abord,
+  // réécrira la FK, puis poussera l'opération — jamais de violation FK.
+  const hasTempRefs =
+    (typeof header.client_id === 'number' && (header.client_id as number) < 0) ||
+    (typeof header.fournisseur_id === 'number' && (header.fournisseur_id as number) < 0);
+
+  if (!isOnline() || hasTempRefs) {
+    return enqueueFallback(hasTempRefs ? 'références locales à synchroniser d\'abord' : 'offline');
   }
 
-  // Online path — direct Supabase
+  // Online path — RPC atomique
   try {
-    const { data: newOp, error: opErr } = await supabase
-      .from('operations')
-      .insert(headerWithId)
-      .select()
-      .single();
-
-    if (opErr) throw new Error(opErr.message);
-    const parentId: number = (newOp as any).num_op;
-
-    if (items.length > 0) {
-      const itemRows = items.map((i) => ({ ...i, operation_id: parentId }));
-      const { error: itemsErr } = await supabase.from('operation_items').insert(itemRows);
-      if (itemsErr) throw new Error(itemsErr.message);
-    }
+    const { data: commitRes, error: commitErr } = await supabase.rpc('commit_operation', {
+      p_header: headerWithId,
+      p_items: items,
+    });
+    if (commitErr) throw new Error(commitErr.message);
+    const parentId = Number((commitRes as any)?.num_op);
+    if (!Number.isFinite(parentId)) throw new Error('commit_operation : num_op manquant dans la réponse');
 
     console.info(`[Sync] commitOperation — online, num_op=${parentId}`);
     return { numOp: parentId, queued: false };
@@ -370,4 +367,100 @@ export async function enqueueOperation(
   });
   console.info(`[Sync] operation enqueued — id:${id} type:${type}`);
   return id as number;
+}
+
+// ── Fiches maîtres créées hors-ligne (clients / fournisseurs) ─────────────────
+
+export interface MasterRecordPayload {
+  tempId: number;                    // id local NÉGATIF (jamais en collision avec un serial)
+  record: Record<string, unknown>;   // colonnes réelles de la table cible
+}
+
+/** File une fiche maître créée hors-ligne — synchronisée AVANT les opérations. */
+export async function enqueueMasterRecord(
+  type: 'client' | 'fournisseur',
+  tempId: number,
+  record: Record<string, unknown>
+): Promise<number> {
+  const id = await db.sync_queue.add({
+    type,
+    payload:    JSON.stringify({ tempId, record }),
+    status:     'pending',
+    retryCount: 0,
+    lastError:  null,
+    createdAt:  Date.now(),
+  });
+  console.info(`[Sync] fiche ${type} enqueued — temp:${tempId} queue:${id}`);
+  return id as number;
+}
+
+/**
+ * Pousse une fiche maître vers Supabase, résout son id réel, met à jour Dexie,
+ * puis RÉÉCRIT toutes les opérations en file qui référencent l'id temporaire.
+ * Idempotent : un retry retrouve la fiche par (nom + téléphone) sans doublon.
+ */
+async function pushMasterRecord(item: SyncQueueItem, payload: MasterRecordPayload): Promise<void> {
+  const { tempId, record } = payload;
+  const isClient = item.type === 'client';
+  const table = isClient ? 'clients' : 'fournisseurs';
+  const idCol = isClient ? 'id_client' : 'id_fournisseur';
+  const nameCol = isClient ? 'nom_prenom' : 'nom';
+
+  // ── Idempotence : déjà insérée par un retry précédent ? ────────────────────
+  let realId: number | null = null;
+  const { data: existing, error: findErr } = await supabase
+    .from(table)
+    .select(`${idCol}, num_telephone`)
+    .eq(nameCol, String(record[nameCol] ?? ''));
+  if (findErr) throw new Error(findErr.message);
+  const tel = String(record.num_telephone ?? '');
+  const match = (existing || []).find((r: any) => String(r.num_telephone ?? '') === tel);
+  if (match) realId = (match as any)[idCol];
+
+  if (realId == null) {
+    const { data: inserted, error: insErr } = await supabase
+      .from(table)
+      .insert(record)
+      .select(idCol)
+      .single();
+    if (insErr) throw new Error(insErr.message);
+    realId = (inserted as any)[idCol];
+  }
+
+  // ── Dexie : remplace la fiche temporaire par la fiche réelle ────────────────
+  if (isClient) {
+    await db.clients.delete(tempId);
+    await db.clients.put({
+      id_client:     realId!,
+      nom_prenom:    String(record.nom_prenom ?? ''),
+      num_telephone: (record.num_telephone as string | null) ?? null,
+      fonction:      (record.fonction as string | null) ?? null,
+      actif:         true,
+    });
+  } else {
+    await db.fournisseurs.delete(tempId);
+    await db.fournisseurs.put({
+      id_fournisseur: realId!,
+      nom:            String(record.nom ?? ''),
+      type:           (record.type as string | null) ?? null,
+      num_telephone:  (record.num_telephone as string | null) ?? null,
+    });
+  }
+
+  // ── Réécriture des opérations en file qui pointent l'id temporaire ──────────
+  const fkField = isClient ? 'client_id' : 'fournisseur_id';
+  const all = await db.sync_queue.toArray();
+  for (const o of all) {
+    if (o.type !== 'operation' && o.type !== 'retour_client') continue;
+    try {
+      const pl = JSON.parse(o.payload);
+      if (pl?.header?.[fkField] === tempId) {
+        pl.header[fkField] = realId;
+        await db.sync_queue.update(o.id!, { payload: JSON.stringify(pl) });
+        console.info(`[Sync] op en file ${o.id} : ${fkField} ${tempId} → ${realId}`);
+      }
+    } catch { /* payload illisible — ignoré */ }
+  }
+
+  console.info(`[Sync] fiche ${item.type} synchronisée — temp:${tempId} → réel:${realId}`);
 }

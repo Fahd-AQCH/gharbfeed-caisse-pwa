@@ -25,6 +25,27 @@ import SyncHub from './pages/SyncHub';
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
 import Notifier from './components/ui/Notifier';
+
+// ── HOTFIX offline : cache du profil utilisateur ───────────────────────────────
+// Hors-ligne, le fetch du profil échoue ; sans cache l'app affichait l'écran
+// bloquant « Profil utilisateur introuvable ». La session Supabase survit en
+// localStorage — le profil doit y survivre aussi.
+const PROFILE_CACHE_KEY = 'gf_profile_cache';
+
+function cacheProfile(p: UserProfile): void {
+  try { localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify(p)); } catch { /* quota */ }
+}
+
+function readCachedProfile(userId: string): UserProfile | null {
+  try {
+    const raw = localStorage.getItem(PROFILE_CACHE_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as UserProfile;
+    return p && p.id === userId ? p : null;
+  } catch {
+    return null;
+  }
+}
 import { AnimatePresence } from 'motion/react';
 
 export default function App() {
@@ -94,6 +115,15 @@ export default function App() {
 
         if (userError) {
           console.error('[App] fetchProfile error:', userError);
+          // HOTFIX offline : le fetch échoue (réseau coupé, Supabase injoignable)
+          // → on restaure le profil mis en cache lors de la dernière session
+          // réussie. L'UI ne se bloque JAMAIS pour une panne réseau.
+          const cached = readCachedProfile(session.user.id);
+          if (cached) {
+            console.info('[App] profil restauré depuis le cache local (offline)');
+            setProfile(cached);
+            return;
+          }
           // Fallback for admin
           if (session.user.email === 'aqch.fahd@gmail.com') {
             setProfile({
@@ -120,14 +150,16 @@ export default function App() {
               ? userData.actif
               : true;
 
-          setProfile({
+          const builtProfile = {
             id: userData.id,
             username: userData.nom || userData.username || session.user.email?.split('@')[0] || 'Utilisateur',
             email: session.user.email || userData.email || '',
             roleId: roleId,
             isActive: isActive,
             createdAt: new Date(userData.created_at || userData.date_creation || Date.now()),
-          } as UserProfile);
+          } as UserProfile;
+          setProfile(builtProfile);
+          cacheProfile(builtProfile); // survie hors-ligne du profil
 
           // ── Populate local Dexie DB on first authenticated load ────────────
           if (!syncedRef.current && navigator.onLine) {
@@ -167,20 +199,25 @@ export default function App() {
             .then(({ data: userData, error: userError }) => {
               if (!mounted) return;
               if (userError || !userData) {
-                setProfile(null);
+                // HOTFIX offline : un refetch en échec (token rafraîchi hors-ligne,
+                // réseau coupé…) ne doit JAMAIS écraser un profil déjà chargé,
+                // ni bloquer l'UI — on garde l'existant ou le cache local.
+                setProfile((prev) => prev ?? readCachedProfile(session.user.id));
                 return;
               }
               const rawRole = userData.role_id || userData.role || 'caissier';
               const roleId = rawRole === 'admin' ? 'admin' : rawRole === 'tresorier' ? 'tresorier' : 'cashier';
               const isActive = userData.is_active !== undefined ? userData.is_active : userData.actif !== undefined ? userData.actif : true;
-              setProfile({
+              const refreshedProfile = {
                 id: userData.id,
                 username: userData.nom || userData.username || session.user.email?.split('@')[0] || 'Utilisateur',
                 email: session.user.email || userData.email || '',
                 roleId: roleId,
                 isActive: isActive,
                 createdAt: new Date(userData.created_at || userData.date_creation || Date.now()),
-              } as UserProfile);
+              } as UserProfile;
+              setProfile(refreshedProfile);
+              cacheProfile(refreshedProfile);
             });
         } else {
           setUser(null);
@@ -235,19 +272,22 @@ export default function App() {
             <div className="flex flex-col flex-1 overflow-hidden min-w-0">
               <Header profile={profile} isOffline={isOffline} onToggleSidebar={() => setSidebarOpen((v) => !v)} />
               <main className="flex-1 overflow-hidden bg-slate-50">
+                {/* HOTFIX — MODE POS STRICT hors-ligne : la base étant injoignable,
+                    toutes les routes data-dépendantes redirigent vers la caisse.
+                    Seules /cashier (Dexie local) et /sync (file locale) survivent. */}
                 <Routes>
-                  <Route path="/" element={<Dashboard profile={profile} />} />
+                  <Route path="/" element={isOffline ? <Navigate to="/cashier" replace /> : <Dashboard profile={profile} />} />
                   <Route path="/cashier" element={<Cashier profile={profile} />} />
-                  <Route path="/inventory" element={<Inventory profile={profile} />} />
-                  <Route path="/clients" element={<Clients profile={profile} />} />
-                  <Route path="/history" element={<History profile={profile} />} />
-                  <Route path="/fournisseurs" element={<Fournisseurs profile={profile} />} />
-                  <Route path="/debts" element={<Debts profile={profile} />} />
-                  <Route path="/expenses" element={<Expenses profile={profile} />} />
-                  <Route path="/closures" element={<Closures profile={profile} />} />
+                  <Route path="/inventory" element={isOffline ? <Navigate to="/cashier" replace /> : <Inventory profile={profile} />} />
+                  <Route path="/clients" element={isOffline ? <Navigate to="/cashier" replace /> : <Clients profile={profile} />} />
+                  <Route path="/history" element={isOffline ? <Navigate to="/cashier" replace /> : <History profile={profile} />} />
+                  <Route path="/fournisseurs" element={isOffline ? <Navigate to="/cashier" replace /> : <Fournisseurs profile={profile} />} />
+                  <Route path="/debts" element={isOffline ? <Navigate to="/cashier" replace /> : <Debts profile={profile} />} />
+                  <Route path="/expenses" element={isOffline ? <Navigate to="/cashier" replace /> : <Expenses profile={profile} />} />
+                  <Route path="/closures" element={isOffline ? <Navigate to="/cashier" replace /> : <Closures profile={profile} />} />
                   <Route path="/sync" element={<SyncHub profile={profile} />} />
-                  <Route path="/admin" element={<Admin profile={profile} />} />
-                  <Route path="*" element={<Navigate to="/" replace />} />
+                  <Route path="/admin" element={isOffline ? <Navigate to="/cashier" replace /> : <Admin profile={profile} />} />
+                  <Route path="*" element={<Navigate to={isOffline ? '/cashier' : '/'} replace />} />
                 </Routes>
               </main>
             </div>

@@ -14,6 +14,7 @@ import {
   Receipt,
   Archive,
   RefreshCw,
+  WifiOff,
 } from 'lucide-react';
 import { UserProfile } from '../../types';
 import { cn } from '../../lib/utils';
@@ -121,32 +122,52 @@ export default function Sidebar({ profile, mobileOpen = false, onClose }: Sideba
 
       <nav className="flex-1 py-4">
         <div className="px-4 space-y-1">
-          {filteredMenu.map((item) => (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              onClick={onClose}
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center space-x-3 px-4 py-2.5 rounded-lg transition-colors group',
-                  isActive
-                    ? 'bg-emerald-600 text-white'
-                    : 'text-slate-400 hover:bg-slate-800 hover:text-white'
-                )
-              }
-            >
-              <item.icon className="w-5 h-5" />
-              <span className="font-medium">{item.label}</span>
-              {item.path === '/sync' && queueTotal > 0 && (
-                <span className={cn(
-                  'ml-auto text-[10px] font-black rounded-full min-w-5 h-5 px-1.5 flex items-center justify-center',
-                  queueFailed > 0 ? 'bg-rose-500 text-white' : 'bg-amber-500 text-white'
-                )}>
-                  {queueTotal > 99 ? '99+' : queueTotal}
-                </span>
-              )}
-            </NavLink>
-          ))}
+          {filteredMenu.map((item) => {
+            // HOTFIX — MODE POS STRICT hors-ligne : seules la Caisse (Dexie) et la
+            // Synchronisation (file locale) fonctionnent sans réseau. Le reste est
+            // désactivé pour éviter chargements infinis et erreurs de fetch.
+            const blockedOffline = !online && item.path !== '/cashier' && item.path !== '/sync';
+            if (blockedOffline) {
+              return (
+                <div
+                  key={item.path}
+                  className="flex items-center space-x-3 px-4 py-2.5 rounded-lg text-slate-600 cursor-not-allowed select-none opacity-60"
+                  title="Indisponible hors ligne — base de données injoignable"
+                  aria-disabled="true"
+                >
+                  <item.icon className="w-5 h-5" />
+                  <span className="font-medium">{item.label}</span>
+                  <WifiOff className="w-3.5 h-3.5 ml-auto text-slate-600" />
+                </div>
+              );
+            }
+            return (
+              <NavLink
+                key={item.path}
+                to={item.path}
+                onClick={onClose}
+                className={({ isActive }) =>
+                  cn(
+                    'flex items-center space-x-3 px-4 py-2.5 rounded-lg transition-colors group',
+                    isActive
+                      ? 'bg-emerald-600 text-white'
+                      : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                  )
+                }
+              >
+                <item.icon className="w-5 h-5" />
+                <span className="font-medium">{item.label}</span>
+                {item.path === '/sync' && queueTotal > 0 && (
+                  <span className={cn(
+                    'ml-auto text-[10px] font-black rounded-full min-w-5 h-5 px-1.5 flex items-center justify-center',
+                    queueFailed > 0 ? 'bg-rose-500 text-white' : 'bg-amber-500 text-white'
+                  )}>
+                    {queueTotal > 99 ? '99+' : queueTotal}
+                  </span>
+                )}
+              </NavLink>
+            );
+          })}
         </div>
       </nav>
 

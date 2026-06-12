@@ -40,7 +40,9 @@ export interface LocalFournisseur {
 // ── Offline queue ─────────────────────────────────────────────────────────────
 
 export type SyncQueueStatus = 'pending' | 'processing' | 'failed';
-export type SyncQueueType   = 'operation' | 'retour_client';
+// 'client' / 'fournisseur' = fiches maîtres créées hors-ligne — synchronisées
+// EN PREMIER (graphe de dépendances : les opérations les référencent par FK)
+export type SyncQueueType   = 'operation' | 'retour_client' | 'client' | 'fournisseur';
 
 export interface SyncQueueItem {
   id?: number;                      // auto-increment PK
