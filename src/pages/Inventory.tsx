@@ -571,7 +571,7 @@ export default function Inventory({ profile }: InventoryProps) {
                           const pct = Math.max(0, Math.min(100, (p.stockActual / (seuil * 2)) * 100));
                           const tone = p.stockActual <= 0 ? 'rose' : p.stockActual <= seuil ? 'amber' : 'emerald';
                           return (
-                            <div className="min-w-[120px]">
+                            <div className="w-[130px]">
                               <div className="flex items-baseline gap-1.5">
                                 <span className={cn(
                                   'font-bold',
