@@ -119,7 +119,7 @@ export default function Login() {
             />
           </div>
           <h1 className="text-3xl font-bold text-white mb-1">GharbFeed</h1>
-          <span className="text-emerald-400 text-xs font-black tracking-[0.25em] uppercase mb-3">v1.2</span>
+          <span className="text-emerald-400 text-xs font-black tracking-[0.25em] uppercase mb-3">v2.0</span>
           <p className="text-slate-400 text-sm">Système de gestion de stock et caisse professionnel</p>
         </div>
 

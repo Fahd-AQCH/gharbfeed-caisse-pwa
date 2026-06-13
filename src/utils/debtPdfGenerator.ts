@@ -204,7 +204,7 @@ export function generateDebtPaymentPDF(data: DebtPaymentReceiptData): void {
   doc.line(margin, footerY - 4, pageW - margin, footerY - 4);
   doc.setFontSize(6.5); doc.setFont('helvetica', 'normal'); doc.setTextColor(...C.slate400);
   doc.text(`Imprimé le ${new Date().toLocaleString('fr-FR')}`, margin, footerY);
-  doc.text('GharbFeed v1.2 · Gestion des Créances', pageW / 2, footerY, { align: 'center' });
+  doc.text('GharbFeed v2.0 · Gestion des Créances', pageW / 2, footerY, { align: 'center' });
   doc.text('Merci !', pageW - margin, footerY, { align: 'right' });
 
   doc.save(`recu_${data.operationNumber}_${data.datePaiement}${data.isInitialPayment ? '_initial' : ''}${data.pendingValidation ? '_provisoire' : ''}.pdf`);

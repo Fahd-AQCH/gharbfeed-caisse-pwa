@@ -87,7 +87,7 @@ export default function Admin({ profile }: AdminProps) {
   const [newUsername, setNewUsername] = useState('');
   const [newNom, setNewNom] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [newRole, setNewRole] = useState<'admin' | 'cashier'>('cashier');
+  const [newRole, setNewRole] = useState<'admin' | 'tresorier' | 'cashier'>('cashier');
   const [isCreating, setIsCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [showNewPassword, setShowNewPassword] = useState(false);
@@ -232,7 +232,7 @@ export default function Admin({ profile }: AdminProps) {
         id: newUserId,
         username: newUsername.trim(),
         nom: newNom.trim() || newUsername.trim(),
-        role_id: newRole === 'admin' ? 'admin' : 'caissier',
+        role_id: newRole === 'admin' ? 'admin' : newRole === 'tresorier' ? 'tresorier' : 'caissier',
         is_active: true,
       });
       if (res.error) {
@@ -240,7 +240,7 @@ export default function Admin({ profile }: AdminProps) {
           id: newUserId,
           username: newUsername.trim(),
           nom: newNom.trim() || newUsername.trim(),
-          role: newRole === 'admin' ? 'admin' : 'caissier',
+          role: newRole === 'admin' ? 'admin' : newRole === 'tresorier' ? 'tresorier' : 'caissier',
           actif: true,
         });
       }
@@ -1451,7 +1451,7 @@ export default function Admin({ profile }: AdminProps) {
             <div className="bg-slate-900 p-6 rounded-[32px] text-white overflow-hidden relative">
               <div className="relative z-10">
                 <h4 className="font-black text-emerald-400 text-xs uppercase tracking-widest mb-2">Infrastructure</h4>
-                <p className="text-lg font-bold mb-4">GharbFeed Core v1.2</p>
+                <p className="text-lg font-bold mb-4">GharbFeed Core v2.0</p>
                 <div className="space-y-0">
                   {[
                     { label: 'Database Status', value: 'Online', color: 'text-emerald-400' },
@@ -1548,8 +1548,9 @@ export default function Admin({ profile }: AdminProps) {
                 <div className="space-y-2">
                   <label className="text-xs font-black text-slate-400 uppercase tracking-widest pl-1">Rôle</label>
                   <select className="w-full bg-slate-50 border border-slate-200 rounded-xl py-3 px-4 text-sm font-bold focus:ring-2 focus:ring-blue-500/20"
-                    value={newRole} onChange={(e) => setNewRole(e.target.value as 'admin' | 'cashier')}>
+                    value={newRole} onChange={(e) => setNewRole(e.target.value as 'admin' | 'tresorier' | 'cashier')}>
                     <option value="cashier">Caissier</option>
+                    <option value="tresorier">Trésorier</option>
                     <option value="admin">Administrateur</option>
                   </select>
                 </div>

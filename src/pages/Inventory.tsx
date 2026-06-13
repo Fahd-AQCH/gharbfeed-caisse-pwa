@@ -62,6 +62,9 @@ export default function Inventory({ profile }: InventoryProps) {
   const [originalPdatOnEdit, setOriginalPdatOnEdit] = useState<number | null>(null);
 
   const isAdmin = profile?.roleId === 'admin';
+  // Confidentialité : la valorisation du stock est une donnée financière —
+  // visible UNIQUEMENT par l'admin et le trésorier, jamais par le caissier
+  const canViewValuation = isAdmin || profile?.roleId === 'tresorier';
 
   // Raw DB rows — needed for XLSX export (qte_achat, qte_vente)
   const rawProdsRef = useRef<any[]>([]);
@@ -354,7 +357,8 @@ export default function Inventory({ profile }: InventoryProps) {
       base['Qté Achetée'] = parseFloat(raw?.qte_achat ?? 0);
       base['Qté Vendue'] = parseFloat(raw?.qte_vente ?? 0);
       base['Stock Disponible'] = p.stockActual;
-      base['Valeur Stock (DH)'] = (p.stockActual * p.defaultPrice).toFixed(2);
+      // Confidentialité : valorisation réservée admin & trésorier (comme la colonne)
+      if (canViewValuation) base['Valeur Stock (DH)'] = (p.stockActual * p.defaultPrice).toFixed(2);
       base['Seuil Alerte'] = p.seuilAlerte ?? 10;
       return base;
     });
@@ -362,7 +366,9 @@ export default function Inventory({ profile }: InventoryProps) {
     ws['!cols'] = [
       { wch: 10 }, { wch: 30 }, { wch: 18 }, { wch: 14 },
       ...(isAdmin ? [{ wch: 14 }] : []),
-      { wch: 13 }, { wch: 13 }, { wch: 16 }, { wch: 16 }, { wch: 13 },
+      { wch: 13 }, { wch: 13 }, { wch: 16 },
+      ...(canViewValuation ? [{ wch: 16 }] : []),
+      { wch: 13 },
     ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'État du Stock');
@@ -511,9 +517,11 @@ export default function Inventory({ profile }: InventoryProps) {
                     <th className="px-6 py-4 cursor-pointer hover:text-slate-800 select-none" onClick={() => handleInvSort('categoryId')}>
                       <span className="flex items-center gap-1">Catégorie {invSortIcon('categoryId')}</span>
                     </th>
-                    <th className="px-6 py-4 cursor-pointer hover:text-slate-800 select-none" onClick={() => handleInvSort('valeurStock')}>
-                      <span className="flex items-center gap-1">Valeur Stock {invSortIcon('valeurStock')}</span>
-                    </th>
+                    {canViewValuation && (
+                      <th className="px-6 py-4 cursor-pointer hover:text-slate-800 select-none" onClick={() => handleInvSort('valeurStock')}>
+                        <span className="flex items-center gap-1">Valeur Stock {invSortIcon('valeurStock')}</span>
+                      </th>
+                    )}
                     <th className="px-6 py-4 cursor-pointer hover:text-slate-800 select-none" onClick={() => handleInvSort('stockActual')}>
                       <span className="flex items-center gap-1">Stock {invSortIcon('stockActual')}</span>
                     </th>
@@ -549,31 +557,63 @@ export default function Inventory({ profile }: InventoryProps) {
                           {p.categoryId || '—'}
                         </span>
                       </td>
-                      {/* Valeur Stock */}
-                      <td className="px-6 py-4 font-bold text-emerald-700">
-                        {(p.stockActual * p.defaultPrice).toFixed(2)} DH
-                      </td>
-                      {/* Stock */}
+                      {/* Valeur Stock — donnée financière : admin & trésorier uniquement */}
+                      {canViewValuation && (
+                        <td className="px-6 py-4 font-bold text-emerald-700">
+                          {(p.stockActual * p.defaultPrice).toFixed(2)} DH
+                        </td>
+                      )}
+                      {/* Stock — quantité + jauge visuelle vs seuil d'alerte */}
                       <td className="px-6 py-4 text-slate-700">
-                        <div className="flex items-center space-x-2">
-                          <div className={cn(
-                            "h-2 w-2 rounded-full",
-                            p.stockActual > (p.seuilAlerte ?? 10) ? "bg-emerald-500" : "bg-red-500"
-                          )} />
-                          <span className={cn("font-bold", p.stockActual <= (p.seuilAlerte ?? 10) ? "text-red-600" : "")}>
-                            {p.stockActual}
-                          </span>
-                          <span className="text-slate-500">{units.find(u => u.id === p.unitId)?.symbol}</span>
-                        </div>
+                        {(() => {
+                          const seuil = Math.max(1, p.seuilAlerte ?? 10);
+                          // Jauge pleine à 2× le seuil = zone confortable ; le seuil = 50 %
+                          const pct = Math.max(0, Math.min(100, (p.stockActual / (seuil * 2)) * 100));
+                          const tone = p.stockActual <= 0 ? 'rose' : p.stockActual <= seuil ? 'amber' : 'emerald';
+                          return (
+                            <div className="min-w-[120px]">
+                              <div className="flex items-baseline gap-1.5">
+                                <span className={cn(
+                                  'font-bold',
+                                  tone === 'rose' ? 'text-rose-600' : tone === 'amber' ? 'text-amber-600' : 'text-slate-800'
+                                )}>
+                                  {p.stockActual}
+                                </span>
+                                <span className="text-slate-400 text-xs">{units.find(u => u.id === p.unitId)?.symbol}</span>
+                                <span className="ml-auto text-[10px] text-slate-300 font-medium">seuil {seuil}</span>
+                              </div>
+                              <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
+                                <div
+                                  className={cn(
+                                    'h-full rounded-full transition-all',
+                                    tone === 'rose' ? 'bg-rose-500' : tone === 'amber' ? 'bg-amber-400' : 'bg-emerald-500'
+                                  )}
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </td>
-                      {/* Statut */}
+                      {/* Statut — badge dynamique de disponibilité */}
                       <td className="px-6 py-4">
-                        <span className={cn(
-                          "px-2 py-1 rounded text-xs font-bold uppercase",
-                          p.isActive ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"
-                        )}>
-                          {p.isActive ? 'Actif' : 'Inactif'}
-                        </span>
+                        {!p.isActive ? (
+                          <span className="px-2 py-1 rounded-lg text-xs font-bold uppercase tracking-wider bg-slate-100 text-slate-500">
+                            Inactif
+                          </span>
+                        ) : p.stockActual <= 0 ? (
+                          <span className="px-2 py-1 rounded-lg text-xs font-bold uppercase tracking-wider bg-rose-100 text-rose-700 whitespace-nowrap">
+                            Rupture de Stock
+                          </span>
+                        ) : p.stockActual <= (p.seuilAlerte ?? 10) ? (
+                          <span className="px-2 py-1 rounded-lg text-xs font-bold uppercase tracking-wider bg-amber-100 text-amber-700 whitespace-nowrap">
+                            Alerte de Stock
+                          </span>
+                        ) : (
+                          <span className="px-2 py-1 rounded-lg text-xs font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700">
+                            Disponible
+                          </span>
+                        )}
                       </td>
                       {/* Actions */}
                       <td className="px-6 py-4">

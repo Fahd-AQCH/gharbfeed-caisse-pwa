@@ -170,7 +170,7 @@ export function generateRetourPDF(operation: RetourOperation, items: RetourItem[
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(...COLORS.slate400);
   doc.text(`Imprimé le ${new Date().toLocaleString('fr-FR')}`, margin, footerY);
-  doc.text('GharbFeed v1.2 · Système de Gestion', pageW / 2, footerY, { align: 'center' });
+  doc.text('GharbFeed v2.0 · Système de Gestion', pageW / 2, footerY, { align: 'center' });
   doc.text('Merci de votre confiance.', pageW - margin, footerY, { align: 'right' });
 
   const filename = `retour_${operation.type}_${operation.returnOpNumber}_${operation.date}.pdf`;

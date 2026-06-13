@@ -114,7 +114,7 @@ export default function Sidebar({ profile, mobileOpen = false, onClose }: Sideba
               GharbFeed
             </h1>
             <span className="text-emerald-400 text-xs font-bold tracking-widest uppercase">
-              v1.2
+              v2.0
             </span>
           </div>
         </div>
