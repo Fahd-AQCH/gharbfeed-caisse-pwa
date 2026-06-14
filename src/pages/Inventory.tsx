@@ -71,6 +71,8 @@ export default function Inventory({ profile }: InventoryProps) {
 
   const [invSortKey, setInvSortKey] = useState<InvSortKey | null>(null);
   const [invSortDir, setInvSortDir] = useState<'asc' | 'desc'>('asc');
+  // PAMP map: code → pamp (admin only, confidentiel)
+  const [pampMap, setPampMap] = useState<Record<string, number | null>>({});
 
   const [newProduct, setNewProduct] = useState({
     code: "",
@@ -114,6 +116,9 @@ export default function Inventory({ profile }: InventoryProps) {
       isActive: p.is_active !== false,
     })));
     setLoading(false);
+    const pm: Record<string, number | null> = {};
+    liveProds.forEach(lp => { pm[lp.code] = lp.pamp ?? null; });
+    setPampMap(pm);
   }, [liveProds]);
 
   // fetchData: used after writes (add/edit/delete) to sync Supabase → Dexie → UI
@@ -522,6 +527,11 @@ export default function Inventory({ profile }: InventoryProps) {
                         <span className="flex items-center gap-1">Valeur Stock {invSortIcon('valeurStock')}</span>
                       </th>
                     )}
+                    {isAdmin && (
+                      <th className="px-6 py-4 whitespace-nowrap">
+                        Valeur au coût (PAMP)
+                      </th>
+                    )}
                     <th className="px-6 py-4 cursor-pointer hover:text-slate-800 select-none" onClick={() => handleInvSort('stockActual')}>
                       <span className="flex items-center gap-1">Stock {invSortIcon('stockActual')}</span>
                     </th>
@@ -563,33 +573,59 @@ export default function Inventory({ profile }: InventoryProps) {
                           {(p.stockActual * p.defaultPrice).toFixed(2)} DH
                         </td>
                       )}
-                      {/* Stock — quantité + jauge visuelle vs seuil d'alerte */}
-                      <td className="px-6 py-4 text-slate-700">
+                      {/* Valeur au coût (PAMP) — confidentiel : admin uniquement */}
+                      {isAdmin && (
+                        <td className="px-6 py-4">
+                          {pampMap[p.code] != null
+                            ? <span className="font-bold text-sky-700">{(p.stockActual * (pampMap[p.code] as number)).toFixed(2)} DH</span>
+                            : <span className="text-slate-300 font-medium">—</span>
+                          }
+                        </td>
+                      )}
+                      {/* Stock — anneau circulaire centré sur la quantité */}
+                      <td className="px-6 py-4">
                         {(() => {
                           const seuil = Math.max(1, p.seuilAlerte ?? 10);
-                          // Jauge pleine à 2× le seuil = zone confortable ; le seuil = 50 %
                           const pct = Math.max(0, Math.min(100, (p.stockActual / (seuil * 2)) * 100));
                           const tone = p.stockActual <= 0 ? 'rose' : p.stockActual <= seuil ? 'amber' : 'emerald';
+                          const SZ = 44, SW = 4, R = (SZ - SW) / 2;
+                          const C = 2 * Math.PI * R;
+                          const offset = C * (1 - pct / 100);
+                          const strokeColor = tone === 'rose' ? '#f43f5e' : tone === 'amber' ? '#fbbf24' : '#10b981';
+                          const textColor = tone === 'rose' ? 'text-rose-600' : tone === 'amber' ? 'text-amber-600' : 'text-slate-800';
+                          const unitSymbol = units.find(u => u.id === p.unitId)?.symbol;
                           return (
-                            <div className="w-[130px]">
-                              <div className="flex items-baseline gap-1.5">
+                            <div
+                              className="relative"
+                              style={{ width: SZ, height: SZ }}
+                              title={`Stock: ${p.stockActual} · Seuil: ${seuil}`}
+                            >
+                              <svg width={SZ} height={SZ} style={{ transform: 'rotate(-90deg)' }}>
+                                {/* Track */}
+                                <circle cx={SZ/2} cy={SZ/2} r={R} fill="none" stroke={strokeColor} strokeWidth={SW} strokeOpacity={0.15} />
+                                {/* Progress */}
+                                <circle
+                                  cx={SZ/2} cy={SZ/2} r={R}
+                                  fill="none"
+                                  stroke={strokeColor}
+                                  strokeWidth={SW}
+                                  strokeLinecap="round"
+                                  strokeDasharray={C}
+                                  strokeDashoffset={offset}
+                                  style={{ transition: 'stroke-dashoffset 0.3s ease' }}
+                                />
+                              </svg>
+                              <div className="absolute inset-0 flex flex-col items-center justify-center leading-none">
                                 <span className={cn(
-                                  'font-bold',
-                                  tone === 'rose' ? 'text-rose-600' : tone === 'amber' ? 'text-amber-600' : 'text-slate-800'
+                                  'font-bold leading-none',
+                                  textColor,
+                                  String(p.stockActual).length > 3 ? 'text-[9px]' : 'text-[11px]'
                                 )}>
                                   {p.stockActual}
                                 </span>
-                                <span className="text-slate-400 text-xs">{units.find(u => u.id === p.unitId)?.symbol}</span>
-                                <span className="ml-auto text-[10px] text-slate-300 font-medium">seuil {seuil}</span>
-                              </div>
-                              <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
-                                <div
-                                  className={cn(
-                                    'h-full rounded-full transition-all',
-                                    tone === 'rose' ? 'bg-rose-500' : tone === 'amber' ? 'bg-amber-400' : 'bg-emerald-500'
-                                  )}
-                                  style={{ width: `${pct}%` }}
-                                />
+                                {unitSymbol && (
+                                  <span className="text-[8px] text-slate-400 leading-none mt-0.5">{unitSymbol}</span>
+                                )}
                               </div>
                             </div>
                           );
@@ -648,6 +684,24 @@ export default function Inventory({ profile }: InventoryProps) {
               </table>
             </div>
           </div>
+
+          {isAdmin && (() => {
+            const totalPAMP = sortedProducts.reduce((sum, p) => {
+              const pamp = pampMap[p.code];
+              return sum + (pamp != null ? p.stockActual * pamp : 0);
+            }, 0);
+            return (
+              <div className="bg-sky-50 border border-sky-200 rounded-2xl p-5 flex items-center justify-between shadow-sm">
+                <div>
+                  <p className="text-xs font-black text-sky-700 uppercase tracking-wider">Valeur totale du stock (PAMP)</p>
+                  <p className="text-[10px] text-sky-400 font-medium mt-0.5">Coût moyen pondéré · produits filtrés · pamp NULL exclus</p>
+                </div>
+                <p className="text-2xl font-black text-sky-700">
+                  {totalPAMP.toLocaleString('fr-MA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-sm font-bold text-sky-400">DH</span>
+                </p>
+              </div>
+            );
+          })()}
       </>
 
       {/* Add Product Modal */}

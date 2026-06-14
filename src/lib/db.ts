@@ -17,6 +17,7 @@ export interface LocalProduit {
   categorie?: string | null;
   prix_vente: number;
   pdat?: number;          // purchase price (admin only)
+  pamp?: number | null;   // PAMP (coût moyen pondéré d'achat) — CONFIDENTIEL, figé à la vente (Phase 2). Jamais affiché caissier.
   stock_actuel: number;
   seuil_alerte?: number;
   is_active?: boolean;

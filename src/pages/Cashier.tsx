@@ -717,12 +717,19 @@ export default function Cashier({ profile }: CashierProps) {
         observ: isVente ? 'Vente caisse' : 'Achat en attente de validation admin',
       };
 
-      const itemRows = cart.map((item) => ({
-        produit_id:    item.productId,
-        quantite:      item.quantity,
-        prix_unitaire: item.unitPrice,
-        total_ligne:   item.lineTotal,
-      }));
+      const itemRows = cart.map((item) => {
+        // PAMP (Phase 2) : coût figé à la vente, lu depuis le MÊME cache Dexie (liveProds)
+        // que le POS, à l'instant de la vente. CONFIDENTIEL — jamais affiché. Porté dans le
+        // payload (online ET file offline) → jamais recalculé au push. Achat/retour → null.
+        const cached = (liveProds ?? []).find((p) => p.code === item.productId);
+        return {
+          produit_id:    item.productId,
+          quantite:      item.quantity,
+          prix_unitaire: item.unitPrice,
+          total_ligne:   item.lineTotal,
+          cout_unitaire: isVente ? (cached?.pamp ?? null) : null,
+        };
+      });
 
       // ── COMMIT: online → direct Supabase; offline → enqueue ───────────────
       const { numOp, queued } = await commitOperation(header, itemRows);

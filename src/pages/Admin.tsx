@@ -27,10 +27,15 @@ import {
   AlertTriangle,
   Eye,
   EyeOff,
+  Download,
+  FileUp,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast, askConfirm } from '../lib/notify';
+import * as XLSX from 'xlsx';
+import { unzipSync, zipSync, strFromU8, strToU8, type Zippable } from 'fflate';
+import { pullMasterData } from '../lib/syncService';
 import {
   ResponsiveContainer,
   LineChart, Line,
@@ -73,6 +78,355 @@ const PIE_COLORS = ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444', '#06b
 const PAIEMENT_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444'];
 const MONTHS_FR = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Jun', 'Jul', 'Aoû', 'Sep', 'Oct', 'Nov', 'Déc'];
 
+// ─── Import fichier (Produits / Clients) ──────────────────────────────────────
+// Valeurs autorisées (couche applicative — aucune contrainte CHECK en DB) :
+const CATEGORIES_IMPORT = ['Matière première', 'Aliment composé', 'Additif', 'CMV', 'Bloc à lécher', 'Matériel', 'Produit Hygien'];
+const FONCTIONS_IMPORT = ['Eleveur', 'Technicien', 'Vétérinaire', 'Inséminateur', 'Revendeur', 'Client Comptoir'];
+
+interface ProductAnalysis {
+  rowNum: number;
+  code: string;
+  produit: string;
+  action: 'insert' | 'update' | 'skip';
+  reason?: string;
+  warning?: string;
+  categorie?: string | null;
+  prix_vente?: number | null;
+  pdat?: number | null;
+  stock_actuel?: number | null;
+  seuil_alerte?: number | null;
+  description?: string | null;
+  existingPamp?: number | null;
+  existingStock?: number | null;
+  existingPrix?: number | null;
+}
+interface ClientAnalysis {
+  rowNum: number;
+  nom_prenom: string;
+  action: 'insert' | 'skip';
+  reason?: string;
+  fonction?: string | null;
+  num_telephone?: string | null;
+  adresse?: string | null;
+}
+type ImportPreview =
+  | { kind: 'products'; rows: ProductAnalysis[] }
+  | { kind: 'clients'; rows: ClientAnalysis[] };
+
+// Accent- & casse-insensible (corrige aussi les mojibake type "�leveur")
+const canonStr = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+
+// Code produit : opaque, jamais numérique. "1" / "01" / "0001" / "#0001" → "#0001"
+const normCode = (v: any): string => {
+  let s = String(v ?? '').trim();
+  if (s.startsWith('#')) s = s.slice(1).trim();
+  if (/^\d+$/.test(s)) return '#' + s.padStart(4, '0');
+  return '#' + s;
+};
+
+// Décimales virgule OU point ("180,00" / "1 500,00" / "6 700 MAD") → number | null
+const parseNum = (v: any): number | null => {
+  if (v == null) return null;
+  let s = String(v).trim();
+  if (s === '') return null;
+  s = s.replace(/[^\d.,-]/g, '');
+  if (s === '') return null;
+  if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (s.includes(',')) s = s.replace(',', '.');
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+};
+
+const clientKey = (nom: any, tel: any) => `${String(nom ?? '').trim().toLowerCase()}|${String(tel ?? '').trim()}`;
+
+// Parse .xlsx/.csv → tableau de lignes (cellules = chaînes affichées, raw:false
+// préserve les zéros de tête des téléphones quand la colonne est formatée Texte)
+async function parseSheet(file: File): Promise<string[][]> {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const aoa = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, raw: false, defval: '' });
+  return aoa.map((row) => (Array.isArray(row) ? row.map((c) => String(c ?? '')) : []));
+}
+
+// Analyse READ-ONLY produits : insert/update/skip + raisons. Lit l'existant (code, pamp, stock, prix).
+async function analyzeProducts(rows: string[][]): Promise<ProductAnalysis[]> {
+  const headers = (rows[0] || []).map((h) => h.trim().toUpperCase());
+  const col = (n: string) => headers.indexOf(n);
+  const cCode = col('CODE'), cName = col('PRODUIT'), cCat = col('CATEGORIE'),
+    cPv = col('PRIX_VENTE'), cPa = col('PRIX_ACHAT'), cStock = col('STOCK_ACTUEL'),
+    cSeuil = col('SEUIL_ALERTE'), cDesc = col('DESCRIPTION');
+  if (cCode < 0 || cName < 0) throw new Error('Colonnes requises manquantes : CODE et PRODUIT.');
+
+  const { data: existing, error } = await supabase.from('produits').select('code, pamp, stock_actuel, prix_vente');
+  if (error) throw error;
+  const exMap = new Map<string, { pamp: number | null; stock: number; prix: number }>();
+  (existing || []).forEach((p: any) => exMap.set(p.code, {
+    pamp: p.pamp != null ? parseFloat(p.pamp) : null,
+    stock: parseFloat(p.stock_actuel || 0),
+    prix: parseFloat(p.prix_vente || 0),
+  }));
+
+  const out: ProductAnalysis[] = [];
+  const seen = new Set<string>();
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i] || [];
+    const rawCode = String(r[cCode] ?? '').trim();
+    const name = String(r[cName] ?? '').trim();
+    if (!rawCode && !name) continue; // ligne vide
+    const rowNum = i + 1;
+    if (!rawCode) { out.push({ rowNum, code: '', produit: name, action: 'skip', reason: 'CODE manquant' }); continue; }
+    if (!name) { out.push({ rowNum, code: rawCode, produit: '', action: 'skip', reason: 'PRODUIT manquant' }); continue; }
+    const code = normCode(rawCode);
+    if (seen.has(code)) { out.push({ rowNum, code, produit: name, action: 'skip', reason: 'doublon dans le fichier' }); continue; }
+    seen.add(code);
+
+    let categorie: string | null = null;
+    if (cCat >= 0 && String(r[cCat] ?? '').trim() !== '') {
+      const raw = String(r[cCat]).trim();
+      const m = CATEGORIES_IMPORT.find((x) => canonStr(x) === canonStr(raw));
+      if (!m) { out.push({ rowNum, code, produit: name, action: 'skip', reason: `catégorie invalide : "${raw}"` }); continue; }
+      categorie = m;
+    }
+    const prix_vente = cPv >= 0 ? parseNum(r[cPv]) : null;
+    const pdat = cPa >= 0 ? parseNum(r[cPa]) : null;
+    const stock_actuel = cStock >= 0 ? parseNum(r[cStock]) : null;
+    const seuilRaw = cSeuil >= 0 ? parseNum(r[cSeuil]) : null;
+    const description = cDesc >= 0 ? String(r[cDesc] ?? '').trim() : null;
+
+    const ex = exMap.get(code);
+    const action: 'insert' | 'update' = ex ? 'update' : 'insert';
+    const warning = action === 'insert' && (pdat == null || pdat <= 0)
+      ? "produit neuf sans prix d'achat → pas de coût/marge" : undefined;
+
+    out.push({
+      rowNum, code, produit: name, action, warning,
+      categorie, prix_vente, pdat, stock_actuel,
+      seuil_alerte: seuilRaw != null ? Math.round(seuilRaw) : null,
+      description: description || null,
+      existingPamp: ex?.pamp ?? null,
+      existingStock: ex?.stock ?? null,
+      existingPrix: ex?.prix ?? null,
+    });
+  }
+  return out;
+}
+
+// Analyse READ-ONLY clients : dédoublonnage sur nom_prenom+num_telephone (DB + intra-fichier).
+async function analyzeClients(rows: string[][]): Promise<ClientAnalysis[]> {
+  const headers = (rows[0] || []).map((h) => h.trim().toUpperCase());
+  const col = (n: string) => headers.indexOf(n);
+  const cName = col('NOM_PRENOM'), cFonc = col('FONCTION'), cTel = col('NUM_TELEPHONE'), cAdr = col('ADRESSE');
+  if (cName < 0) throw new Error('Colonne requise manquante : NOM_PRENOM.');
+
+  const { data: existing, error } = await supabase.from('clients').select('nom_prenom, num_telephone');
+  if (error) throw error;
+  const exKeys = new Set((existing || []).map((c: any) => clientKey(c.nom_prenom, c.num_telephone)));
+
+  const out: ClientAnalysis[] = [];
+  const seen = new Set<string>();
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i] || [];
+    const name = String(r[cName] ?? '').trim();
+    const rowNum = i + 1;
+    if (!name) {
+      if (r.some((c) => String(c ?? '').trim() !== '')) out.push({ rowNum, nom_prenom: '', action: 'skip', reason: 'NOM_PRENOM manquant' });
+      continue;
+    }
+    const tel = cTel >= 0 ? String(r[cTel] ?? '').trim() : '';
+    let fonction: string | null = null;
+    if (cFonc >= 0 && String(r[cFonc] ?? '').trim() !== '') {
+      const raw = String(r[cFonc]).trim();
+      const m = FONCTIONS_IMPORT.find((x) => canonStr(x) === canonStr(raw));
+      if (!m) { out.push({ rowNum, nom_prenom: name, action: 'skip', reason: `fonction invalide : "${raw}"` }); continue; }
+      fonction = m;
+    }
+    const adresse = cAdr >= 0 ? String(r[cAdr] ?? '').trim() : '';
+    const key = clientKey(name, tel);
+    if (exKeys.has(key)) { out.push({ rowNum, nom_prenom: name, action: 'skip', reason: 'doublon (existe déjà)' }); continue; }
+    if (seen.has(key)) { out.push({ rowNum, nom_prenom: name, action: 'skip', reason: 'doublon dans le fichier' }); continue; }
+    seen.add(key);
+    out.push({ rowNum, nom_prenom: name, fonction, num_telephone: tel || null, adresse: adresse || null, action: 'insert' });
+  }
+  return out;
+}
+
+// Écriture produits — UPSERT on code. updateStock pilote l'écrasement du stock des EXISTANTS.
+async function writeProducts(rows: ProductAnalysis[], updateStock: boolean): Promise<{ inserted: number; updated: number }> {
+  const inserts = rows.filter((r) => r.action === 'insert');
+  const updates = rows.filter((r) => r.action === 'update');
+
+  const insertPayload = inserts.map((r) => {
+    const stock = r.stock_actuel ?? 0;
+    const prix = r.prix_vente ?? 0;
+    const pdat = r.pdat ?? 0;
+    return {
+      code: r.code, produit: r.produit,
+      description: r.description ?? '',
+      categorie: r.categorie ?? 'Matériel',
+      prix_vente: prix, pdat,
+      stock_actuel: stock, stock_initial: stock,
+      qte_achat: 0, qte_vente: 0,
+      valeur_stock: stock * prix,
+      seuil_alerte: r.seuil_alerte ?? 10,
+      is_active: true,
+      pamp: pdat > 0 ? pdat : null, // SEED pamp = pdat (sinon NULL). valeur_stock_pamp jamais écrit (D8).
+    };
+  });
+  if (insertPayload.length) {
+    const { error } = await supabase.from('produits').insert(insertPayload);
+    if (error) throw error;
+  }
+
+  for (const r of updates) {
+    const payload: Record<string, any> = { produit: r.produit }; // n'écrase une colonne que si le fichier l'a fournie
+    if (r.description != null) payload.description = r.description;
+    if (r.categorie != null) payload.categorie = r.categorie;
+    if (r.prix_vente != null) payload.prix_vente = r.prix_vente;
+    if (r.pdat != null) payload.pdat = r.pdat;
+    if (r.seuil_alerte != null) payload.seuil_alerte = r.seuil_alerte;
+    let effStock = r.existingStock ?? 0;
+    if (updateStock && r.stock_actuel != null) { payload.stock_actuel = r.stock_actuel; effStock = r.stock_actuel; }
+    const effPrix = r.prix_vente != null ? r.prix_vente : (r.existingPrix ?? 0);
+    payload.valeur_stock = effStock * effPrix;
+    // pamp : NE JAMAIS écraser une moyenne mobile existante — seed seulement si NULL et prix d'achat fourni.
+    if (r.existingPamp == null && r.pdat != null && r.pdat > 0) payload.pamp = r.pdat;
+    // qte_achat / qte_vente / stock_initial / is_active : jamais touchés en update.
+    const { error } = await supabase.from('produits').update(payload).eq('code', r.code);
+    if (error) throw error;
+  }
+  return { inserted: insertPayload.length, updated: updates.length };
+}
+
+// Écriture clients — insert des nouveaux uniquement (les doublons sont déjà classés 'skip').
+async function writeClients(rows: ClientAnalysis[]): Promise<{ inserted: number }> {
+  const inserts = rows.filter((r) => r.action === 'insert').map((r) => ({
+    nom_prenom: r.nom_prenom,
+    fonction: r.fonction ?? null,
+    num_telephone: r.num_telephone ?? null,
+    adresse: r.adresse ?? null,
+    actif: true,
+  }));
+  if (inserts.length) {
+    const { error } = await supabase.from('clients').insert(inserts);
+    if (error) throw error;
+  }
+  return { inserted: inserts.length };
+}
+
+// Génère et télécharge un modèle .xlsx avec dropdowns (dataValidation) et format texte sur CODE.
+// SheetJS community ne supporte pas dataValidations → on injecte le XML brut via fflate.
+function downloadTemplate(type: 'products' | 'clients') {
+  const aoa = type === 'products'
+    ? [
+        ['CODE', 'PRODUIT', 'CATEGORIE', 'PRIX_VENTE', 'PRIX_ACHAT', 'STOCK_ACTUEL', 'SEUIL_ALERTE', 'DESCRIPTION'],
+        ['#0001', 'MACHINE A TRAIRE HUILE (1 VACHE)', 'Matériel', 6700, 5300, 5, 5, 'Trayeuse mono-poste'],
+        ['#0500', 'ALIMENT VACHE LAITIÈRE 25KG', 'Aliment composé', 180, 145.5, 40, 10, 'Sac 25 kg'],
+      ]
+    : [
+        ['NOM_PRENOM', 'FONCTION', 'NUM_TELEPHONE', 'ADRESSE'],
+        ['Adil Larach', 'Eleveur', '0661962189', 'Larache'],
+        ['Fatima Zahra', 'Vétérinaire', '0612345678', 'Kénitra'],
+      ];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, type === 'products' ? 'Produits' : 'Clients');
+
+  // Step 1 — Generate raw XLSX bytes. XLSX.write(type:'array') returns an ArrayBuffer,
+  // NOT a Uint8Array — fflate.unzipSync needs a Uint8Array, so wrap it (no copy).
+  const rawBuf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
+  const rawBytes = new Uint8Array(rawBuf);
+
+  // Step 2 — Unpack the ZIP
+  const files = unzipSync(rawBytes) as Record<string, Uint8Array>;
+
+  // Step 3 — Inject into worksheet XML.
+  // ⚠️ SpreadsheetML (CT_Worksheet) imposes a FIXED child order:
+  //   sheetViews → (sheetFormatPr) → cols → sheetData → … → dataValidations → … → ignoredErrors → …
+  // SheetJS emits <ignoredErrors> after </sheetData>, so <dataValidations> MUST be spliced right
+  // after </sheetData> (before ignoredErrors) — anchoring on </worksheet> lands it AFTER
+  // ignoredErrors, which violates the order and corrupts the part (Excel drops the sheet).
+  const sheetKey = 'xl/worksheets/sheet1.xml';
+  let sheetXml = strFromU8(files[sheetKey]);
+
+  const xmlEsc = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // dataValidations goes after </mergeCells> if present, else immediately after </sheetData>.
+  const insertDV = (xml: string, dv: string) =>
+    xml.includes('</mergeCells>')
+      ? xml.replace('</mergeCells>', '</mergeCells>' + dv)
+      : xml.replace('</sheetData>', '</sheetData>' + dv);
+
+  if (type === 'products') {
+    // ① Append a TEXT cell format (numFmtId=49 / "@") to cellXfs and CAPTURE its index.
+    //    The new <xf> is appended last → its index = the OLD cellXfs count. Don't hardcode:
+    //    SheetJS's default cellXfs count can differ between versions/inputs.
+    const stylesKey = 'xl/styles.xml';
+    let stylesXml = strFromU8(files[stylesKey]);
+    let textStyleIdx = 0;
+    stylesXml = stylesXml.replace(
+      /<cellXfs count="(\d+)">/,
+      (_: string, n: string) => {
+        textStyleIdx = parseInt(n, 10);
+        return `<cellXfs count="${textStyleIdx + 1}">`;
+      }
+    );
+    stylesXml = stylesXml.replace(
+      '</cellXfs>',
+      '<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+    );
+    files[stylesKey] = strToU8(stylesXml);
+
+    // ② <cols> (schema slot: after sheetViews, before sheetData) → col A: visible width (14) +
+    //    the text format captured above, so "#0001" stays text and the column is not collapsed.
+    if (!sheetXml.includes('<cols>')) {
+      sheetXml = sheetXml.replace(
+        '<sheetData>',
+        `<cols><col min="1" max="1" width="14" customWidth="1" style="${textStyleIdx}"/></cols><sheetData>`
+      );
+    }
+    // ③ dataValidation dropdown on CATEGORIE (col C, rows 2–1000)
+    const catList = CATEGORIES_IMPORT.map(xmlEsc).join(',');
+    sheetXml = insertDV(
+      sheetXml,
+      `<dataValidations count="1"><dataValidation type="list" allowBlank="0" showInputMessage="1" showErrorMessage="1" sqref="C2:C1000"><formula1>"${catList}"</formula1></dataValidation></dataValidations>`
+    );
+    files[sheetKey] = strToU8(sheetXml);
+  } else {
+    // dataValidation dropdown on FONCTION (col B, rows 2–1000), blank allowed
+    const fonctList = FONCTIONS_IMPORT.map(xmlEsc).join(',');
+    sheetXml = insertDV(
+      sheetXml,
+      `<dataValidations count="1"><dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" sqref="B2:B1000"><formula1>"${fonctList}"</formula1></dataValidation></dataValidations>`
+    );
+    files[sheetKey] = strToU8(sheetXml);
+  }
+
+  // Step 4 — Repack
+  const outBytes = zipSync(files as unknown as Zippable);
+
+  // Step 5 — Sanity-check the output is a valid zip before serving it, so a malformed
+  // file can never be downloaded again. Checks the PK magic header + re-parses the zip.
+  if (outBytes[0] !== 0x50 || outBytes[1] !== 0x4b) {
+    throw new Error('downloadTemplate: sortie invalide (en-tête ZIP "PK" manquant)');
+  }
+  const verify = unzipSync(outBytes) as Record<string, Uint8Array>;
+  if (!verify[sheetKey] || !strFromU8(verify[sheetKey]).includes('<dataValidations')) {
+    throw new Error('downloadTemplate: dataValidations absent du fichier généré');
+  }
+
+  // Step 6 — Trigger download
+  const blob = new Blob([outBytes], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `gharbfeed_modele_${type === 'products' ? 'produits' : 'clients'}.xlsx`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Admin({ profile }: AdminProps) {
@@ -92,13 +446,17 @@ export default function Admin({ profile }: AdminProps) {
   const [createError, setCreateError] = useState<string | null>(null);
   const [showNewPassword, setShowNewPassword] = useState(false);
 
-  // ── Import CSV ────────────────────────────────────────────────────────────
+  // ── Import fichier (Produits / Clients) ───────────────────────────────────
   const [showImport, setShowImport] = useState(false);
   const [importType, setImportType] = useState<'products' | 'clients'>('products');
-  const [csvData, setCsvData] = useState('');
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
+  const [importFileName, setImportFileName] = useState('');
+  const [analyzing, setAnalyzing] = useState(false);
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
+  // Option A/B (produits) : écraser le stock des EXISTANTS. Décoché = sûr (option B).
+  const [updateStock, setUpdateStock] = useState(false);
 
   // ── Fournisseurs ─────────────────────────────────────────────────────────
   const [fournisseurs, setFournisseurs] = useState<Fournisseur[]>([]);
@@ -138,6 +496,8 @@ export default function Admin({ profile }: AdminProps) {
   const [canalCA, setCanalCA] = useState<{ name: string; value: number }[]>([]);
   const [topClients, setTopClients] = useState<{ nom: string; total: number }[]>([]);
   const [topFournisseursData, setTopFournisseursData] = useState<{ nom: string; total: number }[]>([]);
+  // PAMP Phase 3 — bénéfice réel basé sur cout_unitaire figé à la vente (confidentiel)
+  const [beneficePAMP, setBeneficePAMP] = useState(0);
 
   // ── Créances ──────────────────────────────────────────────────────────────
   const [debtKpis, setDebtKpis] = useState({ totalDette: 0, nbOperations: 0, pctDetteVsCA: 0 });
@@ -268,71 +628,88 @@ export default function Admin({ profile }: AdminProps) {
     }
   };
 
-  // ── Import CSV — handler ──────────────────────────────────────────────────
+  // ── Import fichier — handlers ─────────────────────────────────────────────
 
-  const handleImportCsv = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const resetImport = () => {
+    setShowImport(false);
+    setPreview(null);
+    setImportFileName('');
     setImportError(null);
     setImportSuccess(null);
-    setIsImporting(true);
+    setUpdateStock(false);
+  };
+
+  // Change de cible → on repart à zéro (l'analyse dépend de la table visée)
+  const handleChangeImportType = (t: 'products' | 'clients') => {
+    setImportType(t);
+    setPreview(null);
+    setImportFileName('');
+    setImportError(null);
+    setImportSuccess(null);
+  };
+
+  // Sélection fichier → parse + analyse READ-ONLY → preview (aucune écriture)
+  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // autorise la re-sélection du même fichier
+    if (!file) return;
+    setImportError(null);
+    setImportSuccess(null);
+    setPreview(null);
+    setImportFileName(file.name);
+    setAnalyzing(true);
     try {
-      const lines = csvData.split('\n').map(l => l.trim()).filter(l => l);
-      if (lines.length < 2) throw new Error('Le fichier CSV doit contenir au moins une ligne d\'en-tête et une ligne de données.');
-
-      const isComma = lines[0].includes(',');
-      const sep = isComma ? ',' : ';';
-      const headers = lines[0].split(sep);
-      const getIdx = (name: string) => headers.findIndex(h => h.trim().toUpperCase() === name);
-
-      const itemsToInsert: any[] = [];
-      for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i].split(sep);
-        if (cols.length < 2) continue;
-        if (importType === 'products') {
-          const codeIdx = getIdx('CODE');
-          const nameIdx = getIdx('PRODUIT');
-          const descIdx = getIdx('DESCRIPTION');
-          const priceIdx = getIdx('PRIX_VENTE');
-          const stockIdx = getIdx('STOCK_ACTUEL');
-          const code = codeIdx >= 0 && cols[codeIdx] ? cols[codeIdx] : `#P${i}`;
-          const name = nameIdx >= 0 && cols[nameIdx] ? cols[nameIdx] : `Produit ${i}`;
-          const priceVal = priceIdx >= 0 ? parseFloat(cols[priceIdx].replace(',', '.')) : 0;
-          const stockVal = stockIdx >= 0 ? parseFloat(cols[stockIdx].replace(',', '.')) : 0;
-          itemsToInsert.push({
-            code,
-            produit: name,
-            description: descIdx >= 0 ? cols[descIdx] : '',
-            prix_vente: isNaN(priceVal) ? 0 : priceVal,
-            stock_initial: isNaN(stockVal) ? 0 : stockVal,
-            stock_actuel: isNaN(stockVal) ? 0 : stockVal,
-            qte_achat: 0,
-            qte_vente: 0,
-            pdat: isNaN(priceVal) ? 0 : priceVal,
-            valeur_stock: (isNaN(priceVal) ? 0 : priceVal) * (isNaN(stockVal) ? 0 : stockVal),
-          });
-        } else if (importType === 'clients') {
-          const nameIdx = getIdx('NOM_PRENOM');
-          const addressIdx = getIdx('ADRESSE');
-          const funcIdx = getIdx('FONCTION');
-          const phoneIdx = getIdx('NUM_TELEPHONE');
-          const name = nameIdx >= 0 && cols[nameIdx] ? cols[nameIdx] : `Client ${i}`;
-          itemsToInsert.push({
-            nom_prenom: name,
-            adresse: addressIdx >= 0 ? cols[addressIdx] : '',
-            fonction: funcIdx >= 0 ? cols[funcIdx] : '',
-            num_telephone: phoneIdx >= 0 ? cols[phoneIdx] : '',
-          });
-        }
-      }
-      if (itemsToInsert.length > 0) {
-        const table = importType === 'products' ? 'produits' : 'clients';
-        const { error } = await supabase.from(table).insert(itemsToInsert);
-        if (error) throw error;
-      }
-      setImportSuccess(`${lines.length - 1} éléments importés avec succès !`);
-      setCsvData('');
+      const rows = await parseSheet(file);
+      if (rows.length < 2) throw new Error('Fichier vide ou sans ligne de données.');
+      if (importType === 'products') setPreview({ kind: 'products', rows: await analyzeProducts(rows) });
+      else setPreview({ kind: 'clients', rows: await analyzeClients(rows) });
     } catch (err: any) {
-      setImportError(err.message || "Erreur lors de l'importation.");
+      setImportError(err.message || 'Erreur de lecture du fichier.');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  // Confirmation explicite (askConfirm) PUIS écriture
+  const handleRunImport = async () => {
+    if (!preview) return;
+    const insertN = preview.rows.filter((r) => r.action === 'insert').length;
+    const updateN = preview.rows.filter((r) => r.action === 'update').length;
+    const skipN = preview.rows.filter((r) => r.action === 'skip').length;
+    if (insertN + updateN === 0) { toast.warning('Aucune ligne valide à importer.'); return; }
+    const stockN = preview.kind === 'products' && updateStock
+      ? preview.rows.filter((r) => r.action === 'update' && (r as ProductAnalysis).stock_actuel != null).length : 0;
+
+    const ok = await askConfirm({
+      title: preview.kind === 'products' ? "Confirmer l'import des produits" : "Confirmer l'import des clients",
+      message:
+        `${insertN} à insérer · ${updateN} à mettre à jour · ${skipN} ignorée(s).` +
+        (stockN > 0 ? `\n⚠️ Stock écrasé pour ${stockN} produit(s) existant(s).` : ''),
+      confirmLabel: 'Importer',
+      danger: stockN > 0,
+    });
+    if (!ok) return;
+
+    setIsImporting(true);
+    setImportError(null);
+    try {
+      let msg = '';
+      if (preview.kind === 'products') {
+        const { inserted, updated } = await writeProducts(preview.rows, updateStock);
+        msg = `${inserted} produit(s) inséré(s), ${updated} mis à jour, ${skipN} ignoré(s).`;
+      } else {
+        const { inserted } = await writeClients(preview.rows);
+        msg = `${inserted} client(s) inséré(s), ${skipN} ignoré(s).`;
+      }
+      await pullMasterData().catch(() => { /* cache local — non bloquant */ });
+      toast.success(msg);
+      setImportSuccess(msg);
+      setPreview(null);
+      setImportFileName('');
+    } catch (err: any) {
+      const m = err.message || String(err);
+      setImportError(m);
+      toast.error('Erreur : ' + m);
     } finally {
       setIsImporting(false);
     }
@@ -451,6 +828,7 @@ export default function Admin({ profile }: AdminProps) {
 
   const fetchAnalytics = useCallback(async () => {
     setAnalyticsLoading(true);
+    setBeneficePAMP(0);
     try {
       // ── Plage de dates (timezone Maroc) ───────────────────────────────────
       const todayMA = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Casablanca' }).format(new Date());
@@ -591,7 +969,7 @@ export default function Admin({ profile }: AdminProps) {
       if (venteOpIds.length > 0) {
         const { data: itemsData } = await supabase
           .from('operation_items')
-          .select('produit_id, total_ligne')
+          .select('produit_id, total_ligne, cout_unitaire, quantite, prix_unitaire')
           .in('operation_id', venteOpIds);
         const produitCatMap: Record<string, string> = {};
         produits.forEach((p: any) => { produitCatMap[p.code] = p.categorie || 'Autre'; });
@@ -605,6 +983,15 @@ export default function Admin({ profile }: AdminProps) {
             .sort(([, a], [, b]) => b - a)
             .map(([name, value]) => ({ name, value: Math.round(value) }))
         );
+
+        // Bénéfice NET (PAMP) — lignes avec coût figé connu uniquement
+        let _beneficePAMP = 0;
+        (itemsData || []).forEach((item: any) => {
+          if (item.cout_unitaire != null) {
+            _beneficePAMP += (parseFloat(item.prix_unitaire || 0) - parseFloat(item.cout_unitaire)) * parseFloat(item.quantite || 0);
+          }
+        });
+        setBeneficePAMP(Math.round(_beneficePAMP));
       }
 
       // ── Répartition paiements ─────────────────────────────────────────────
@@ -852,6 +1239,23 @@ export default function Admin({ profile }: AdminProps) {
                       </p>
                     </div>
                   ))}
+                </div>
+
+                {/* ── Bénéfice NET (PAMP) — marge réelle sur coût figé ──────── */}
+                <div className="bg-sky-50 border border-sky-200 rounded-2xl p-5 shadow-sm flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-xs font-black text-sky-700 uppercase tracking-wider leading-tight">Bénéfice NET (PAMP)</p>
+                    <p className="text-[10px] text-sky-400 font-medium mt-0.5">
+                      Σ (prix_vente − coût) · ventes avec coût connu uniquement (post-Phase 2)
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-xl">📊</span>
+                    <p className={cn('text-2xl font-black', beneficePAMP >= 0 ? 'text-sky-700' : 'text-rose-500')}>
+                      {beneficePAMP.toLocaleString('fr-MA', { maximumFractionDigits: 0 })}
+                      <span className="text-sm font-bold text-sky-400 ml-1">DH</span>
+                    </p>
+                  </div>
                 </div>
 
                 {/* ── Créances ─────────────────────────────────────────────── */}
@@ -1405,7 +1809,7 @@ export default function Admin({ profile }: AdminProps) {
                 Sécurité & Maintenance
               </h3>
 
-              {/* Import CSV */}
+              {/* Import fichier */}
               <button
                 onClick={() => setShowImport(true)}
                 className="w-full flex items-center gap-3 p-4 bg-slate-50 hover:bg-slate-100 rounded-2xl transition-all group text-left"
@@ -1414,8 +1818,8 @@ export default function Admin({ profile }: AdminProps) {
                   <FileSpreadsheet className="h-5 w-5" />
                 </div>
                 <div className="flex-1">
-                  <p className="text-sm font-bold text-slate-900 leading-tight">Importer depuis CSV</p>
-                  <p className="text-xs text-slate-500 mt-0.5">Produits et clients depuis Excel</p>
+                  <p className="text-sm font-bold text-slate-900 leading-tight">Importer un fichier</p>
+                  <p className="text-xs text-slate-500 mt-0.5">Produits & clients — Excel/CSV avec aperçu</p>
                 </div>
                 <ChevronRight className="h-4 w-4 text-slate-300 group-hover:text-slate-500 transition-colors" />
               </button>
@@ -1730,64 +2134,159 @@ export default function Admin({ profile }: AdminProps) {
         )}
       </AnimatePresence>
 
-      {/* ── Modal Import CSV ─────────────────────────────────────────────── */}
+      {/* ── Modal Import fichier (Produits / Clients) ────────────────────── */}
       <AnimatePresence>
-        {showImport && (
+        {showImport && (() => {
+          const insertN = preview ? preview.rows.filter((r) => r.action === 'insert').length : 0;
+          const updateN = preview ? preview.rows.filter((r) => r.action === 'update').length : 0;
+          const skipN = preview ? preview.rows.filter((r) => r.action === 'skip').length : 0;
+          const warnN = preview?.kind === 'products' ? preview.rows.filter((r) => (r as ProductAnalysis).warning).length : 0;
+          const stockN = preview?.kind === 'products' && updateStock
+            ? preview.rows.filter((r) => r.action === 'update' && (r as ProductAnalysis).stock_actuel != null).length : 0;
+          return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              onClick={() => setShowImport(false)}
+              onClick={resetImport}
               className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
             />
             <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-2xl bg-white rounded-[32px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+              className="relative w-full max-w-3xl bg-white rounded-[32px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             >
               <div className="p-8 border-b border-slate-200 flex items-center justify-between bg-slate-50 shrink-0">
                 <div>
                   <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight flex items-center gap-3">
                     <FileSpreadsheet className="h-6 w-6 text-blue-500" />
-                    Importer depuis CSV
+                    Importer un fichier
                   </h3>
-                  <p className="text-sm text-slate-500 font-medium mt-1">Collez les données copiées depuis Excel</p>
+                  <p className="text-sm text-slate-500 font-medium mt-1">Fichier Excel ou CSV (.xlsx, .xls, .csv) — aperçu avant écriture</p>
                 </div>
-                <button onClick={() => setShowImport(false)} className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-slate-900">
+                <button onClick={resetImport} className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-slate-900">
                   <X className="h-6 w-6" />
                 </button>
               </div>
-              <form onSubmit={handleImportCsv} className="p-8 space-y-6 overflow-y-auto flex-1">
+
+              <div className="p-8 space-y-6 overflow-y-auto flex-1">
                 {importError && <div className="bg-rose-50 text-rose-600 p-4 rounded-xl text-sm font-bold border border-rose-100">{importError}</div>}
                 {importSuccess && <div className="bg-emerald-50 text-emerald-600 p-4 rounded-xl text-sm font-bold border border-emerald-100">{importSuccess}</div>}
+
+                {/* Type de données */}
                 <div className="space-y-2">
                   <label className="text-xs font-black text-slate-400 uppercase tracking-widest pl-1">Type de données</label>
                   <select className="w-full bg-slate-50 border border-slate-200 rounded-xl py-3 px-4 text-sm font-bold focus:ring-2 focus:ring-blue-500/20"
-                    value={importType} onChange={(e) => setImportType(e.target.value as 'products' | 'clients')}>
+                    value={importType} onChange={(e) => handleChangeImportType(e.target.value as 'products' | 'clients')}>
                     <option value="products">Produits / Catalogue</option>
                     <option value="clients">Clients / Éleveurs</option>
                   </select>
                 </div>
-                <div className="space-y-2">
-                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest pl-1">Données CSV (séparateur ; ou ,)</label>
-                  <textarea required rows={8}
-                    placeholder={importType === 'products'
-                      ? 'CODE;PRODUIT;DESCRIPTION;STOCK_ACTUEL;PRIX_VENTE\n#0001;MACHINE A TRAIRE;…;10;1500'
-                      : 'NOM_PRENOM;ADRESSE;FONCTION;NUM_TELEPHONE\nAdil Larach;Larache;Eleveur;0661962189'}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-mono text-slate-600 focus:ring-2 focus:ring-blue-500/20 whitespace-pre resize-none"
-                    value={csvData} onChange={(e) => setCsvData(e.target.value)} />
-                </div>
-                <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-3 shrink-0">
-                  <button type="button" onClick={() => setShowImport(false)}
-                    className="px-5 py-2.5 bg-white text-slate-500 font-bold rounded-2xl hover:bg-slate-50 transition-all text-sm">
-                    Fermer
+
+                {/* Option A/B — produits uniquement */}
+                {importType === 'products' && (
+                  <label className="flex items-start gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl cursor-pointer">
+                    <input type="checkbox" checked={updateStock} onChange={(e) => setUpdateStock(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 rounded accent-amber-600" />
+                    <span className="text-sm">
+                      <span className="font-bold text-amber-900">Mettre à jour aussi le stock des produits existants</span>
+                      <span className="block text-xs text-amber-700 mt-0.5">
+                        Décoché (défaut) : le stock des produits existants n'est pas touché. Coché : le stock du fichier écrase le stock actuel.
+                        N'affecte jamais les nouveaux produits (toujours pris du fichier).
+                      </span>
+                    </span>
+                  </label>
+                )}
+
+                {/* Modèle + fichier */}
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <button type="button" onClick={() => downloadTemplate(importType)}
+                    className="flex items-center justify-center gap-2 text-sm font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-4 py-3 rounded-2xl transition-all">
+                    <Download className="h-4 w-4" />
+                    Télécharger le modèle
                   </button>
-                  <button type="submit" disabled={isImporting || !csvData.trim()}
-                    className="px-6 py-2.5 bg-blue-600 text-white font-black rounded-2xl hover:bg-blue-500 transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50 flex items-center gap-2 text-sm">
-                    {isImporting ? <Loader2 className="h-5 w-5 animate-spin" /> : <UploadCloud className="h-5 w-5" />}
-                    {isImporting ? 'IMPORTATION…' : "LANCER L'IMPORT"}
-                  </button>
+                  <label className="flex-1 flex items-center justify-center gap-2 text-sm font-bold text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 px-4 py-3 rounded-2xl transition-all cursor-pointer">
+                    {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileUp className="h-4 w-4" />}
+                    {analyzing ? 'Analyse…' : (importFileName || 'Choisir un fichier…')}
+                    <input type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={handleFileSelected} disabled={analyzing || isImporting} />
+                  </label>
                 </div>
-              </form>
+
+                {/* Aperçu */}
+                {preview && (
+                  <div className="space-y-4">
+                    {/* Résumé */}
+                    <div className="flex flex-wrap gap-2">
+                      <span className="px-3 py-1.5 rounded-xl text-xs font-black bg-emerald-100 text-emerald-700">{insertN} à insérer</span>
+                      {preview.kind === 'products' && <span className="px-3 py-1.5 rounded-xl text-xs font-black bg-blue-100 text-blue-700">{updateN} à mettre à jour</span>}
+                      <span className="px-3 py-1.5 rounded-xl text-xs font-black bg-slate-100 text-slate-600">{skipN} ignorée(s)</span>
+                      {warnN > 0 && <span className="px-3 py-1.5 rounded-xl text-xs font-black bg-amber-100 text-amber-700">{warnN} sans prix d'achat</span>}
+                      {stockN > 0 && <span className="px-3 py-1.5 rounded-xl text-xs font-black bg-rose-100 text-rose-700">⚠️ stock écrasé pour {stockN} produit(s) existant(s)</span>}
+                    </div>
+
+                    {/* Tableau */}
+                    <div className="border border-slate-200 rounded-2xl overflow-hidden">
+                      <div className="max-h-[320px] overflow-y-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-slate-50 text-slate-500 uppercase font-bold sticky top-0">
+                            <tr>
+                              <th className="px-3 py-2">Ligne</th>
+                              <th className="px-3 py-2">{preview.kind === 'products' ? 'Code' : 'Nom'}</th>
+                              <th className="px-3 py-2">{preview.kind === 'products' ? 'Produit' : 'Fonction'}</th>
+                              <th className="px-3 py-2">Action</th>
+                              <th className="px-3 py-2">Détail</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-50">
+                            {preview.rows.map((r, i) => {
+                              const prod = preview.kind === 'products' ? (r as ProductAnalysis) : null;
+                              const cli = preview.kind === 'clients' ? (r as ClientAnalysis) : null;
+                              const stockOverwrite = prod && prod.action === 'update' && updateStock && prod.stock_actuel != null;
+                              return (
+                                <tr key={i} className={cn(r.action === 'skip' && 'bg-slate-50/60 text-slate-400')}>
+                                  <td className="px-3 py-2 font-mono text-slate-400">{r.rowNum}</td>
+                                  <td className="px-3 py-2 font-mono font-bold text-slate-600">{prod ? prod.code : cli!.nom_prenom}</td>
+                                  <td className="px-3 py-2 text-slate-700 truncate max-w-[180px]">{prod ? prod.produit : (cli!.fonction || '—')}</td>
+                                  <td className="px-3 py-2">
+                                    <span className={cn('px-2 py-0.5 rounded-lg text-[10px] font-black uppercase',
+                                      r.action === 'insert' ? 'bg-emerald-100 text-emerald-700' :
+                                      r.action === 'update' ? 'bg-blue-100 text-blue-700' :
+                                      'bg-slate-200 text-slate-500')}>
+                                      {r.action === 'insert' ? 'Insérer' : r.action === 'update' ? 'MàJ' : 'Ignorer'}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2 text-slate-500">
+                                    {r.reason
+                                      ? <span className="text-rose-500 font-medium">{r.reason}</span>
+                                      : stockOverwrite
+                                        ? <span className="text-rose-500 font-medium">stock écrasé</span>
+                                        : prod?.warning
+                                          ? <span className="text-amber-600 font-medium">{prod.warning}</span>
+                                          : '—'}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="p-6 border-t border-slate-200 flex items-center justify-end gap-3 shrink-0 bg-slate-50">
+                <button type="button" onClick={resetImport}
+                  className="px-5 py-2.5 bg-white text-slate-500 font-bold rounded-2xl hover:bg-slate-100 transition-all text-sm">
+                  Fermer
+                </button>
+                <button type="button" onClick={handleRunImport} disabled={isImporting || analyzing || !preview || (insertN + updateN === 0)}
+                  className="px-6 py-2.5 bg-blue-600 text-white font-black rounded-2xl hover:bg-blue-500 transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50 flex items-center gap-2 text-sm">
+                  {isImporting ? <Loader2 className="h-5 w-5 animate-spin" /> : <UploadCloud className="h-5 w-5" />}
+                  {isImporting ? 'IMPORTATION…' : "LANCER L'IMPORT"}
+                </button>
+              </div>
             </motion.div>
           </div>
-        )}
+          );
+        })()}
       </AnimatePresence>
     </div>
   );

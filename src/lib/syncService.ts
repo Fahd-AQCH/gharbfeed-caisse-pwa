@@ -56,7 +56,7 @@ export async function pullMasterData(): Promise<{ success: boolean; error?: stri
     // ── Produits ──────────────────────────────────────────────────────────────
     const { data: produitsRaw, error: prodErr } = await supabase
       .from('produits')
-      .select('code, produit, categorie, prix_vente, pdat, stock_actuel, seuil_alerte, is_active');
+      .select('code, produit, categorie, prix_vente, pdat, pamp, stock_actuel, seuil_alerte, is_active');
 
     if (prodErr) throw new Error(`produits: ${prodErr.message}`);
 
@@ -66,6 +66,7 @@ export async function pullMasterData(): Promise<{ success: boolean; error?: stri
       categorie:    p.categorie ?? null,
       prix_vente:   parseFloat(p.prix_vente || 0),
       pdat:         parseFloat(p.pdat || 0),
+      pamp:         p.pamp != null ? parseFloat(p.pamp) : null, // figé à la vente (Phase 2) — confidentiel, jamais affiché
       stock_actuel: parseFloat(p.stock_actuel || 0),
       seuil_alerte: p.seuil_alerte != null ? parseInt(p.seuil_alerte) : 10,
       is_active:    p.is_active !== false,
