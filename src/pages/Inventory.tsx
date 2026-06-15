@@ -340,7 +340,7 @@ export default function Inventory({ profile }: InventoryProps) {
     if (invSortKey === 'code') { valA = a.code; valB = b.code; }
     else if (invSortKey === 'name') { valA = a.name.toLowerCase(); valB = b.name.toLowerCase(); }
     else if (invSortKey === 'defaultPrice') { valA = a.defaultPrice; valB = b.defaultPrice; }
-    else if (invSortKey === 'valeurStock') { valA = a.stockActual * a.defaultPrice; valB = b.stockActual * b.defaultPrice; }
+    else if (invSortKey === 'valeurStock') { valA = a.stockActual * a.purchasePrice; valB = b.stockActual * b.purchasePrice; }
     else if (invSortKey === 'stockActual') { valA = a.stockActual; valB = b.stockActual; }
     else if (invSortKey === 'categoryId') { valA = (a.categoryId || '').toLowerCase(); valB = (b.categoryId || '').toLowerCase(); }
     if (valA < valB) return invSortDir === 'asc' ? -1 : 1;
@@ -351,29 +351,32 @@ export default function Inventory({ profile }: InventoryProps) {
   const handleExportStock = () => {
     const rows = sortedProducts.map(p => {
       const raw = rawProdsRef.current.find(r => r.code === p.code);
+      const pamp = pampMap[p.code];
+      // Colonnes visibles par TOUS les rôles (aucune donnée de coût) :
       const base: Record<string, string | number> = {
         'Code': p.code,
         'Produit': p.name,
         'Catégorie': p.categoryId || '—',
+        'Statut': p.isActive ? 'Actif' : 'Inactif',
         'Prix Vente (DH)': p.defaultPrice.toFixed(2),
+        'Stock Disponible': p.stockActual,
+        'Seuil Alerte': p.seuilAlerte ?? 10,
+        'Qté Achetée': parseFloat(raw?.qte_achat ?? 0),
+        'Qté Vendue': parseFloat(raw?.qte_vente ?? 0),
+        'Valeur au prix de vente (DH)': (p.stockActual * p.defaultPrice).toFixed(2),
       };
-      // Confidentialité : le prix d'achat n'est exporté que pour l'admin
-      if (isAdmin) base['Prix Achat (DH)'] = ((raw?.pdat) ?? 0).toFixed(2);
-      base['Qté Achetée'] = parseFloat(raw?.qte_achat ?? 0);
-      base['Qté Vendue'] = parseFloat(raw?.qte_vente ?? 0);
-      base['Stock Disponible'] = p.stockActual;
-      // Confidentialité : valorisation réservée admin & trésorier (comme la colonne)
-      if (canViewValuation) base['Valeur Stock (DH)'] = (p.stockActual * p.defaultPrice).toFixed(2);
-      base['Seuil Alerte'] = p.seuilAlerte ?? 10;
+      // Colonnes de COÛT — admin & trésorier uniquement, physiquement absentes du fichier d'un caissier.
+      if (canViewValuation) {
+        base['Prix Achat (DH)'] = (p.purchasePrice ?? 0).toFixed(2);
+        base["Valeur au prix d'achat (DH)"] = (p.stockActual * p.purchasePrice).toFixed(2);
+        base['Valeur au coût PAMP (DH)'] = pamp != null ? (p.stockActual * pamp).toFixed(2) : '—';
+      }
       return base;
     });
     const ws = XLSX.utils.json_to_sheet(rows);
     ws['!cols'] = [
-      { wch: 10 }, { wch: 30 }, { wch: 18 }, { wch: 14 },
-      ...(isAdmin ? [{ wch: 14 }] : []),
-      { wch: 13 }, { wch: 13 }, { wch: 16 },
-      ...(canViewValuation ? [{ wch: 16 }] : []),
-      { wch: 13 },
+      { wch: 10 }, { wch: 30 }, { wch: 18 }, { wch: 10 }, { wch: 14 }, { wch: 16 }, { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 22 },
+      ...(canViewValuation ? [{ wch: 14 }, { wch: 24 }, { wch: 22 }] : []),
     ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'État du Stock');
@@ -567,10 +570,10 @@ export default function Inventory({ profile }: InventoryProps) {
                           {p.categoryId || '—'}
                         </span>
                       </td>
-                      {/* Valeur Stock — donnée financière : admin & trésorier uniquement */}
+                      {/* Valeur Stock — au prix d'achat (pdat × stock) ; financière : admin & trésorier uniquement */}
                       {canViewValuation && (
                         <td className="px-6 py-4 font-bold text-emerald-700">
-                          {(p.stockActual * p.defaultPrice).toFixed(2)} DH
+                          {(p.stockActual * p.purchasePrice).toFixed(2)} DH
                         </td>
                       )}
                       {/* Valeur au coût (PAMP) — confidentiel : admin uniquement */}

@@ -487,7 +487,7 @@ export default function Admin({ profile }: AdminProps) {
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   // '' = rolling 12 months (default) | 'YYYY-MM' = specific month filter
   const [selectedPeriod, setSelectedPeriod] = useState('');
-  const [kpis, setKpis] = useState({ caMois: 0, valeurStock: 0, margeBrute: 0, achatsMois: 0, chargesMois: 0, beneficeNet: 0 });
+  const [kpis, setKpis] = useState({ caMois: 0, valeurStock: 0, valeurStockPAMP: 0, margeBrute: 0, achatsMois: 0, chargesMois: 0, beneficeNet: 0 });
   const [caMonthly, setCaMonthly] = useState<{ mois: string; CA: number; Achats: number; Charges: number }[]>([]);
   const [topProduits, setTopProduits] = useState<{ name: string; qte: number }[]>([]);
   const [caCategorie, setCaCategorie] = useState<{ name: string; value: number }[]>([]);
@@ -877,7 +877,7 @@ export default function Admin({ profile }: AdminProps) {
         { data: chargesData },
       ] = await Promise.all([
         opsQuery,
-        supabase.from('produits').select('code, produit, qte_vente, valeur_stock, categorie'),
+        supabase.from('produits').select('code, produit, qte_vente, valeur_stock, categorie, pdat, pamp, stock_actuel'),
         supabase.from('fournisseurs').select('id_fournisseur, nom'),
         supabase
           .from('operations')
@@ -905,11 +905,14 @@ export default function Admin({ profile }: AdminProps) {
       charges.forEach((c: any) => {
         if (c.date_charge >= firstDayThisMonth) chargesMois += parseFloat(c.montant || 0);
       });
-      const valeurStock = produits.reduce((s: number, p: any) => s + parseFloat(p.valeur_stock || 0), 0);
+      // Valorisation du stock au read-time : au prix d'achat (pdat × stock) et au coût moyen pondéré (pamp × stock).
+      const valeurStock = produits.reduce((s: number, p: any) => s + parseFloat(p.pdat || 0) * parseFloat(p.stock_actuel || 0), 0);
+      const valeurStockPAMP = produits.reduce((s: number, p: any) => s + parseFloat(p.pamp || 0) * parseFloat(p.stock_actuel || 0), 0);
       // Bénéfice net réel = CA − Achats − Charges (le vrai résultat du mois)
       setKpis({
         caMois,
         valeurStock,
+        valeurStockPAMP,
         margeBrute: caMois - achatsMois,
         achatsMois,
         chargesMois,
@@ -1219,6 +1222,7 @@ export default function Admin({ profile }: AdminProps) {
                     { label: 'Marge Brute (CA − Achats)', value: kpis.margeBrute, color: kpis.margeBrute >= 0 ? 'amber' : 'rose', icon: '💰' },
                     { label: 'Bénéfice NET (− charges)', value: kpis.beneficeNet, color: kpis.beneficeNet >= 0 ? 'emerald' : 'rose', icon: '🏆' },
                     { label: 'Valeur Stock Total', value: kpis.valeurStock, color: 'blue', icon: '📦' },
+                    { label: 'Valeur Stock Total (PAMP)', value: kpis.valeurStockPAMP, color: 'sky', icon: '📦' },
                   ].map((kpi) => (
                     <div key={kpi.label} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
                       <div className="flex items-start justify-between mb-3">
@@ -1229,6 +1233,7 @@ export default function Admin({ profile }: AdminProps) {
                         'text-2xl font-black',
                         kpi.color === 'emerald' ? 'text-emerald-600' :
                         kpi.color === 'blue'    ? 'text-blue-600'    :
+                        kpi.color === 'sky'     ? 'text-sky-600'     :
                         kpi.color === 'amber'   ? 'text-amber-600'   :
                         kpi.color === 'orange'  ? 'text-orange-600'  :
                         kpi.color === 'rose'    ? 'text-rose-500'    :
@@ -1246,7 +1251,7 @@ export default function Admin({ profile }: AdminProps) {
                   <div>
                     <p className="text-xs font-black text-sky-700 uppercase tracking-wider leading-tight">Bénéfice NET (PAMP)</p>
                     <p className="text-[10px] text-sky-400 font-medium mt-0.5">
-                      Σ (prix_vente − coût) · ventes avec coût connu uniquement (post-Phase 2)
+                      Marge réelle sur les ventes dont le coût est connu
                     </p>
                   </div>
                   <div className="flex items-center gap-3 shrink-0">

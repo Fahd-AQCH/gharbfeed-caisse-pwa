@@ -43,6 +43,10 @@ interface HistoryOperation extends Operation {
   parentOpId?: number;
   montantPaye?: number;
   resteAPayer?: number;
+  conditionPaiement?: string;
+  refPaiement?: string;
+  dateEcheance?: string;
+  canalVente?: string;
   dateOp?: string;   // brut 'YYYY-MM-DD' — comparaison avec le verrou de clôture
   heureOp?: string;  // brut 'HH:MM:SS'
 }
@@ -142,6 +146,10 @@ function mapOperationRow(row: Record<string, unknown>): HistoryOperation {
     parentOpId: row.parent_op_id != null ? Number(row.parent_op_id) : undefined,
     montantPaye: row.montant_paye != null ? parseFloat(String(row.montant_paye)) : undefined,
     resteAPayer: row.reste_a_payer != null ? parseFloat(String(row.reste_a_payer)) : undefined,
+    conditionPaiement: row.condition_paiement as string | undefined,
+    refPaiement: row.ref_paiement as string | undefined,
+    dateEcheance: row.date_echeance ? String(row.date_echeance) : undefined,
+    canalVente: row.canal_vente as string | undefined,
     dateOp: row.date_op ? String(row.date_op) : undefined,
     heureOp: row.heure_op ? String(row.heure_op) : undefined,
   };
@@ -447,7 +455,13 @@ export default function History({ profile }: HistoryProps) {
 
   const handleExportXLSX = () => {
     const rows = filtered.map((op) => {
+      // Confidentialité : pour un caissier, les MONTANTS d'un achat / retour fournisseur
+      // (= prix d'achat / montants fournisseur) sont masqués. Les ventes restent visibles.
       const confidential = isConfidentialOp(op.type);
+      const maskAmt = (v: string) => (confidential ? 'Confidentiel' : v);
+      const paye = op.montantPaye ?? 0;
+      const reste = op.resteAPayer ?? 0;
+      const statutPaiement = reste > 0.01 ? (paye > 0.01 ? 'Partiel' : 'Impayé') : 'Payé';
       return {
         Date: op.createdAt?.toDate?.()?.toLocaleDateString('fr-FR') ?? 'N/A',
         Heure:
@@ -457,31 +471,35 @@ export default function History({ profile }: HistoryProps) {
           }) ?? '',
         Numéro: op.operationNumber,
         Type: op.type === 'retour_client' ? 'Avoir / Retour' : op.type === 'retour_fournisseur' ? 'Retour Fournisseur' : op.type,
+        Client: op.clientName ?? '',
+        Fournisseur: op.fournisseurName ?? '',
+        Agent: op.agentName ?? '',
+        'Canal de vente': op.canalVente ?? '',
         Articles: op.items.length > 0
           ? op.items.map(i => `${i.productName || i.productId} (x${i.quantity})`).join(', ')
           : op.productSummary,
         'Qté totale': op.itemsQuantity,
-        'Montant HT (DH)': confidential ? 'Confidentiel' : op.grossTotal.toFixed(2),
-        'Remise (DH)': confidential ? 'Confidentiel' : (op.discountAmount ?? 0).toFixed(2),
-        'Total Final (DH)': confidential ? 'Confidentiel' : op.finalTotal.toFixed(2),
-        Statut: op.status,
+        'Montant HT (DH)': maskAmt(op.grossTotal.toFixed(2)),
+        'Remise (DH)': maskAmt((op.discountAmount ?? 0).toFixed(2)),
+        'Total Final (DH)': maskAmt(op.finalTotal.toFixed(2)),
+        'Mode de paiement': op.conditionPaiement ?? '',
+        'Référence paiement': op.refPaiement ?? '',
+        'Montant payé (DH)': maskAmt(paye.toFixed(2)),
+        'Reste à payer (DH)': maskAmt(reste.toFixed(2)),
+        'Statut paiement': statutPaiement,
+        "Date d'échéance": op.dateEcheance ?? '',
+        'Statut opération': op.status,
+        Modifié: op.isModified ? 'Oui' : 'Non',
+        Version: op.version ?? 1,
         Observation: op.observation ?? '',
       };
     });
 
     const ws = XLSX.utils.json_to_sheet(rows);
     ws['!cols'] = [
-      { wch: 12 },
-      { wch: 8 },
-      { wch: 14 },
-      { wch: 8 },
-      { wch: 28 },
-      { wch: 10 },
-      { wch: 14 },
-      { wch: 12 },
-      { wch: 14 },
-      { wch: 12 },
-      { wch: 30 },
+      { wch: 12 }, { wch: 8 }, { wch: 14 }, { wch: 16 }, { wch: 20 }, { wch: 20 }, { wch: 16 }, { wch: 14 },
+      { wch: 32 }, { wch: 10 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 16 }, { wch: 18 }, { wch: 15 },
+      { wch: 15 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 9 }, { wch: 9 }, { wch: 30 },
     ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Opérations');
