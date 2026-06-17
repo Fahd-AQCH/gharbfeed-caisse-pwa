@@ -189,14 +189,21 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
     }
     const ticketOp: TicketOperation = {
       id: operation.operationNumber || operation.id,
-      type: (operation.type === 'retour_client' ? 'vente' : operation.type) as 'vente' | 'achat',
+      type: operation.type,   // type_op réel — plus de mapping retour→vente
       date: dateStr,
       time: timeStr,
       // B7 — un ticket réimprimé porte l'agent D'ORIGINE, pas le lecteur actuel
       cashierName: operation.agentName || profile?.username,
+      // Tiers affiché UNIQUEMENT pour les retours (vente/achat : inchangé → "Comptoir")
+      clientName:
+        operation.type === 'retour_fournisseur' ? ((operation as any).fournisseurName || undefined) :
+        operation.type === 'retour_client'       ? ((operation as any).clientName || undefined) :
+        undefined,
       grossTotal,
       discountAmount: operation.discountAmount ?? 0,
       finalTotal,
+      // Confidentialité (garde défensive — bouton déjà masqué pour le caissier sur achat/retour fournisseur)
+      maskAmounts: hidePurchaseAmounts,
     };
     generateTicketPDF(ticketOp, ticketItems);
   };
@@ -457,11 +464,49 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
         }
       }
 
+      // ── Snapshot ticket retour (AVANT onClose — le modal se démonte ensuite) ──
+      const retLabel = `OP-${String(returnOp.num_op).padStart(4, '0')}`;
+      const uniteByCode: Record<string, string> = {};
+      products.forEach((p) => { uniteByCode[p.id] = p.unitId ?? 'u'; });
+      const retTicketItems: TicketItem[] = toReturn.map((i) => ({
+        productId: i.productId,
+        productCode: i.productId,
+        productName: i.productName,
+        quantity: i.returnQty,
+        unitPrice: i.unitPrice,
+        lineTotal: i.returnQty * i.unitPrice,
+        unite: uniteByCode[i.productId] ?? 'u',
+      }));
+      const retTicketOp: TicketOperation = {
+        id: retLabel,
+        type: returnTypeOp,
+        date: todayStr,
+        time: timeStr,
+        clientName: returnForPurchase
+          ? ((operation as any).fournisseurName || undefined)
+          : ((operation as any).clientName || undefined),
+        cashierName: (operation as any).agentName || profile?.username,
+        grossTotal: total,
+        discountAmount: 0,
+        finalTotal: total,
+        // Chemin ADMIN uniquement (handleCreateReturn est isAdmin-gated) → montants visibles.
+        // Garde défensive : masque si un caissier atteignait un retour fournisseur.
+        maskAmounts: isCashier && returnForPurchase,
+      };
+
       setShowReturnPanel(false);
       onUpdate();
+      // Auto-impression du ticket retour — microtask (PDF synchrone ; données déjà figées)
+      Promise.resolve().then(() => {
+        try {
+          generateTicketPDF(retTicketOp, retTicketItems);
+        } catch (pdfErr) {
+          console.error('[Modal] generateTicketPDF (retour):', pdfErr);
+        }
+      });
       onClose();
       const label = returnForPurchase ? 'Retour fournisseur' : 'Avoir';
-      toast.success(`${label} OP-${String(returnOp.num_op).padStart(4, '0')} créé — stock mis à jour.`);
+      toast.success(`${label} ${retLabel} créé — stock mis à jour.`);
     } catch (err) {
       toast.error('Erreur création retour : ' + (err instanceof Error ? err.message : String(err)));
     } finally {

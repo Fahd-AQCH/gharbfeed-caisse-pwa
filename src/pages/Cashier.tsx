@@ -615,17 +615,55 @@ export default function Cashier({ profile }: CashierProps) {
         }
       }
 
+      const opLabel = typeof numOp === 'number' ? `OP-${String(numOp).padStart(4, '0')}` : String(numOp);
+
+      // ── Snapshot ticket AVOIR CLIENT (AVANT reset UI — données figées) ────────
+      // Unité produit depuis le cache Dexie (offline-safe, aucune requête réseau).
+      const localProds = await db.produits.toArray();
+      const uniteByCode: Record<string, string> = {};
+      localProds.forEach((lp) => { uniteByCode[lp.code] = lp.unite ?? 'u'; });
+      const retTicketItems: TicketItem[] = toReturn.map((i) => ({
+        productId: i.productId,
+        productCode: i.productId,
+        productName: i.productName,
+        quantity: i.returnQty,
+        unitPrice: i.unitPrice,
+        lineTotal: i.returnQty * i.unitPrice,
+        unite: uniteByCode[i.productId] ?? 'u',
+      }));
+      const retTicketOp: TicketOperation = {
+        id: opLabel,
+        type: 'retour_client',
+        date: todayStr,
+        time: timeStr,
+        clientName: selectedReturnOp?._clientName ?? undefined,
+        cashierName: profile?.username,
+        grossTotal: total,
+        discountAmount: 0,
+        finalTotal: total,
+        // retour_client = montants côté vente → visibles par le caissier (pas de masquage)
+      };
+
       setShowReturnModal(false);
       setReturnSearch('');
       setReturnSearchResults([]);
       setSelectedReturnOp(null);
       setReturnItems([]);
-      const opLabel = typeof numOp === 'number' ? `OP-${String(numOp).padStart(4, '0')}` : String(numOp);
       if (queued) {
         toast.info(`📶 Retour ${opLabel} sauvegardé localement — stock serveur recrédité à la synchronisation.`);
       } else {
         toast.success(`Retour ${opLabel} créé avec succès. Stock recrédité.`);
       }
+
+      // Auto-impression du ticket AVOIR CLIENT — microtask après commit React (comme la vente)
+      Promise.resolve().then(() => {
+        try {
+          generateTicketPDF(retTicketOp, retTicketItems);
+        } catch (pdfErr) {
+          console.error('[Cashier] generateTicketPDF (retour client):', pdfErr);
+          toast.warning('Le retour est enregistré, mais le ticket PDF a échoué.');
+        }
+      });
     } catch (err: any) {
       toast.error('Erreur retour : ' + (err.message || String(err)));
     } finally {

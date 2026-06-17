@@ -565,7 +565,7 @@ export default function History({ profile }: HistoryProps) {
 
       const ticketOp: TicketOperation = {
         id: op.operationNumber,
-        type: op.type as 'vente' | 'achat',
+        type: op.type,   // type_op réel (vente | achat | retour_client | retour_fournisseur)
         date: dateStr,
         time: timeStr,
         // B7 — un ticket réimprimé porte l'agent D'ORIGINE, pas le lecteur actuel
@@ -573,6 +573,8 @@ export default function History({ profile }: HistoryProps) {
         grossTotal: op.grossTotal,
         discountAmount: op.discountAmount ?? 0,
         finalTotal: op.finalTotal,
+        // Confidentialité (garde défensive — le bouton est déjà désactivé pour ces cas chez le caissier)
+        maskAmounts: isCashier && (op.type === 'achat' || op.type === 'retour_fournisseur'),
       };
 
       generateTicketPDF(ticketOp, ticketItems);

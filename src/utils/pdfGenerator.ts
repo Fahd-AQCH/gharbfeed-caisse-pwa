@@ -16,7 +16,7 @@ export interface TicketItem {
 
 export interface TicketOperation {
   id: string;           // num_op ou uuid court
-  type: 'vente' | 'achat';
+  type: 'vente' | 'achat' | 'retour_client' | 'retour_fournisseur';
   date: string;         // 'YYYY-MM-DD'
   time?: string;        // 'HH:MM:SS'
   clientName?: string;
@@ -26,6 +26,7 @@ export interface TicketOperation {
   finalTotal: number;
   montantPaye?: number;   // Montant encaissé aujourd'hui (paiement partiel)
   resteAPayer?: number;   // Solde restant dû
+  maskAmounts?: boolean;  // Confidentialité : masque les montants (caissier sur achat / retour fournisseur)
 }
 
 // ─── Palette couleurs GharbFeed ─────────────────────────────────────────────
@@ -37,6 +38,8 @@ const COLORS = {
   slate400:   [148, 163, 184] as [number, number, number],
   slate100:   [241, 245, 249] as [number, number, number],
   blue:       [59, 130, 246]  as [number, number, number],
+  purple:     [124, 58, 237]  as [number, number, number],  // retour_client (avoir)
+  orange:     [234, 88,  12]  as [number, number, number],  // retour_fournisseur
   white:      [255, 255, 255] as [number, number, number],
 };
 
@@ -62,7 +65,12 @@ export function generateTicketPDF(
 
   // ── 1. BANDEAU EN-TÊTE ────────────────────────────────────────────────────
   const headerH = 22;
-  const accentColor = operation.type === 'vente' ? COLORS.emerald : COLORS.blue;
+  // Couleur d'accent par type (vente/achat inchangés ; retours = couleurs dédiées et distinctes)
+  const accentColor =
+    operation.type === 'vente'              ? COLORS.emerald :
+    operation.type === 'retour_client'      ? COLORS.purple  :
+    operation.type === 'retour_fournisseur' ? COLORS.orange  :
+    COLORS.blue; // achat
 
   // Rectangle de fond de l'en-tête
   doc.setFillColor(...COLORS.slate900);
@@ -83,14 +91,24 @@ export function generateTicketPDF(
   doc.setTextColor(...COLORS.slate400);
   doc.text("Alimentation animale et Matériel d'élevage", margin + 22, y + 14.5);
 
-  // Badge type opération (droite)
-  const badgeLabel = operation.type === 'vente' ? '  VENTE  ' : '  ACHAT  ';
-  doc.setFillColor(...accentColor);
-  doc.roundedRect(pageW - margin - 22, y + 6, 18, 9, 2, 2, 'F');
+  // Badge type opération (droite) — ancré sur le bord droit du bandeau.
+  // vente/achat : largeur fixe 18mm (rendu identique à l'existant).
+  // retours : libellés plus longs → largeur dynamique (texte + marge), MÊME bord droit.
+  const isReturnTicket = operation.type === 'retour_client' || operation.type === 'retour_fournisseur';
+  const badgeLabel =
+    operation.type === 'vente'              ? 'VENTE' :
+    operation.type === 'retour_client'      ? 'AVOIR CLIENT' :
+    operation.type === 'retour_fournisseur' ? 'RETOUR FOURNISSEUR' :
+    'ACHAT';
   doc.setFontSize(7);
   doc.setFont('helvetica', 'bold');
+  const badgeRight = pageW - margin - 4;          // bord droit constant (inchangé)
+  const badgeW = isReturnTicket ? doc.getTextWidth(badgeLabel) + 6 : 18;
+  const badgeX = badgeRight - badgeW;             // vente/achat : = pageW - margin - 22 (identique)
+  doc.setFillColor(...accentColor);
+  doc.roundedRect(badgeX, y + 6, badgeW, 9, 2, 2, 'F');
   doc.setTextColor(...COLORS.white);
-  doc.text(badgeLabel, pageW - margin - 13, y + 11.8, { align: 'center' });
+  doc.text(badgeLabel, badgeX + badgeW / 2, y + 11.8, { align: 'center' });
 
   y += headerH + 6;
 
@@ -105,11 +123,14 @@ export function generateTicketPDF(
   const col1x = margin;
   const col2x = margin + contentW / 2;
 
+  // Libellé du tiers : « Fournisseur » uniquement pour un retour fournisseur ;
+  // vente / achat / retour client conservent « Client » (rendu inchangé).
+  const partyLabel = operation.type === 'retour_fournisseur' ? 'Fournisseur' : 'Client';
   const infoData: [string, string][] = [
     ['N° Opération', `#${operation.id}`],
     ['Date', operation.date],
     ['Heure', operation.time ? operation.time.slice(0, 5) : '—'],
-    ['Client', operation.clientName || 'Comptoir'],
+    [partyLabel, operation.clientName || 'Comptoir'],
   ];
 
   doc.setFontSize(7.5);
@@ -148,12 +169,18 @@ export function generateTicketPDF(
   doc.text('ARTICLES', margin, y);
   y += 3;
 
+  // Confidentialité : sur un ticket achat / retour fournisseur ouvert par un caissier,
+  // les MONTANTS (prix d'achat) sont remplacés par « ••• ». L'accès est déjà bloqué en
+  // amont (boutons désactivés/masqués) — garde défensive pour que jamais un prix d'achat
+  // n'atteigne un document destiné au caissier. La quantité (+ unité) reste visible.
+  const mask = (v: string) => (operation.maskAmounts ? '•••' : v);
+
   const tableRows = items.map(item => [
     item.productCode,
     item.productName,
     `${item.quantity} ${unitLabel(item.unite)}`,
-    item.unitPrice.toFixed(2),
-    item.lineTotal.toFixed(2),
+    mask(item.unitPrice.toFixed(2)),
+    mask(item.lineTotal.toFixed(2)),
   ]);
 
   autoTable(doc, {
@@ -217,7 +244,7 @@ export function generateTicketPDF(
   };
 
   // Sous-total
-  drawRow('Sous-total :', `${operation.grossTotal.toFixed(2)} DH`);
+  drawRow('Sous-total :', mask(`${operation.grossTotal.toFixed(2)} DH`));
 
   // Remise
   if (hasDiscount) {
@@ -226,7 +253,7 @@ export function generateTicketPDF(
     doc.text('Remise :', totalsX + 4, ty);
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(...accentColor);
-    doc.text(`-${operation.discountAmount.toFixed(2)} DH`, totalsX + totalsW - 4, ty, { align: 'right' });
+    doc.text(mask(`-${operation.discountAmount.toFixed(2)} DH`), totalsX + totalsW - 4, ty, { align: 'right' });
     ty += 6;
   }
 
@@ -241,7 +268,7 @@ export function generateTicketPDF(
   doc.setTextColor(...COLORS.slate900);
   doc.text('TOTAL :', totalsX + 4, ty + 4);
   doc.setTextColor(...accentColor);
-  doc.text(`${operation.finalTotal.toFixed(2)} DH`, totalsX + totalsW - 4, ty + 4, { align: 'right' });
+  doc.text(mask(`${operation.finalTotal.toFixed(2)} DH`), totalsX + totalsW - 4, ty + 4, { align: 'right' });
   ty += 10;
 
   // Détail paiement partiel
