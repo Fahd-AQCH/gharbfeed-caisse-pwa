@@ -63,7 +63,7 @@ export default function Cashier({ profile }: CashierProps) {
     code:          p.code,
     name:          p.produit,
     description:   undefined,
-    unitId:        'u',
+    unitId:        p.unite ?? 'u',
     categoryId:    p.categorie || 'Matériel',
     defaultPrice:  p.prix_vente,
     purchasePrice: p.pdat ?? 0,
@@ -775,6 +775,7 @@ export default function Cashier({ profile }: CashierProps) {
             quantity: item.quantity,
             unitPrice: item.unitPrice,
             lineTotal: item.lineTotal,
+            unite: product?.unitId ?? 'u',
           };
         });
 

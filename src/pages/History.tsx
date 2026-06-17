@@ -23,6 +23,7 @@ import {
 import { cn } from '../lib/utils';
 import OperationDetailsModal from '../components/OperationDetailsModal';
 import { generateTicketPDF, TicketItem, TicketOperation } from '../utils/pdfGenerator';
+import { db } from '../lib/db';
 import { fetchLatestClosure, isBeforeLock, ClosureLock } from '../lib/closureLock';
 import { toast } from '../lib/notify';
 
@@ -547,6 +548,11 @@ export default function History({ profile }: HistoryProps) {
       const timeStr =
         op.createdAt?.toDate?.()?.toTimeString().split(' ')[0] ?? '00:00:00';
 
+      // Unité produit depuis le cache Dexie (offline-safe, aucune requête réseau supplémentaire)
+      const localProds = await db.produits.toArray();
+      const uniteByCode: Record<string, string> = {};
+      localProds.forEach((lp) => { uniteByCode[lp.code] = lp.unite ?? 'u'; });
+
       const ticketItems: TicketItem[] = items.map((item) => ({
         productId: item.productId,
         productCode: item.productId,
@@ -554,6 +560,7 @@ export default function History({ profile }: HistoryProps) {
         quantity: item.quantity,
         unitPrice: item.unitPrice,
         lineTotal: item.lineTotal,
+        unite: uniteByCode[item.productId] ?? 'u',
       }));
 
       const ticketOp: TicketOperation = {

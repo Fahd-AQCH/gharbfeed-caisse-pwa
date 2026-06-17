@@ -90,7 +90,7 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
         code: p.code,
         name: p.produit,
         description: p.description,
-        unitId: 'u',
+        unitId: p.unite ?? 'u',
         categoryId: 'alimentaire',
         defaultPrice: parseFloat(p.prix_vente || 0),
         purchasePrice: parseFloat(p.pdat || 0),
@@ -172,6 +172,7 @@ export default function OperationDetailsModal({ operation, profile, onClose, onU
         quantity: item.quantity,
         unitPrice: item.unitPrice,
         lineTotal: item.lineTotal,
+        unite: p?.unitId ?? 'u',
       };
     });
     let dateStr = '';

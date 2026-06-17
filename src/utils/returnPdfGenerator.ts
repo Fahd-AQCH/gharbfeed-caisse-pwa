@@ -1,6 +1,7 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { drawPdfLogo } from './pdfLogo';
+import { unitLabel } from '../lib/units';
 
 export interface RetourItem {
   productCode: string;
@@ -8,6 +9,7 @@ export interface RetourItem {
   quantity: number;
   unitPrice: number;
   lineTotal: number;
+  unite?: string | null;   // unité produit ('u'|'kg'|'L') — affichée après la quantité
 }
 
 export interface RetourOperation {
@@ -131,7 +133,7 @@ export function generateRetourPDF(operation: RetourOperation, items: RetourItem[
   autoTable(doc, {
     startY: y,
     head: [['Code', 'Produit', 'Qté', 'Prix U. (DH)', 'Total (DH)']],
-    body: items.map(it => [it.productCode, it.productName, it.quantity.toString(), it.unitPrice.toFixed(2), it.lineTotal.toFixed(2)]),
+    body: items.map(it => [it.productCode, it.productName, `${it.quantity} ${unitLabel(it.unite)}`, it.unitPrice.toFixed(2), it.lineTotal.toFixed(2)]),
     margin: { left: margin, right: margin },
     styles: { fontSize: 8, cellPadding: { top: 2.5, bottom: 2.5, left: 3, right: 3 }, font: 'helvetica', textColor: COLORS.slate900 },
     headStyles: { fillColor: accentColor, textColor: COLORS.white, fontStyle: 'bold', fontSize: 7.5 },

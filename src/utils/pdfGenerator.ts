@@ -1,6 +1,7 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { drawPdfLogo } from './pdfLogo';
+import { unitLabel } from '../lib/units';
 
 // ─── Types locaux ───────────────────────────────────────────────────────────
 export interface TicketItem {
@@ -10,6 +11,7 @@ export interface TicketItem {
   quantity: number;
   unitPrice: number;
   lineTotal: number;
+  unite?: string | null;   // unité produit ('u'|'kg'|'L') — affichée après la quantité
 }
 
 export interface TicketOperation {
@@ -149,7 +151,7 @@ export function generateTicketPDF(
   const tableRows = items.map(item => [
     item.productCode,
     item.productName,
-    item.quantity.toString(),
+    `${item.quantity} ${unitLabel(item.unite)}`,
     item.unitPrice.toFixed(2),
     item.lineTotal.toFixed(2),
   ]);
