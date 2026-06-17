@@ -107,7 +107,7 @@ export default function Inventory({ profile }: InventoryProps) {
       code: p.code,
       name: p.produit,
       description: '',
-      unitId: 'u',
+      unitId: p.unite ?? 'u',
       categoryId: p.categorie || 'Matériel',
       defaultPrice: p.prix_vente,
       purchasePrice: p.pdat ?? 0,
@@ -166,6 +166,7 @@ export default function Inventory({ profile }: InventoryProps) {
           valeur_stock: newProduct.stockActual * newProduct.defaultPrice,
           seuil_alerte: newProduct.seuilAlerte,
           categorie: newProduct.categoryId,
+          unite: newProduct.unitId,
         };
         if (isAdmin) {
           updatePayload.stock_actuel = newProduct.stockActual;
@@ -217,6 +218,7 @@ export default function Inventory({ profile }: InventoryProps) {
             valeur_stock: newProduct.stockActual * newProduct.defaultPrice,
             seuil_alerte: newProduct.seuilAlerte,
             categorie: newProduct.categoryId,
+            unite: newProduct.unitId,
           });
         if (error) throw error;
       }

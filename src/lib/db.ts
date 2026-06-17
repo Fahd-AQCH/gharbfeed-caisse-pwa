@@ -21,6 +21,7 @@ export interface LocalProduit {
   stock_actuel: number;
   seuil_alerte?: number;
   is_active?: boolean;
+  unite?: string | null;   // unité de mesure : 'u' | 'kg' | 'L' (défaut 'u')
 }
 
 export interface LocalClient {
