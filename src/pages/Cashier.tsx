@@ -93,7 +93,22 @@ export default function Cashier({ profile }: CashierProps) {
 
   // ── UI state ─────────────────────────────────────────────────────────────────
   const [search, setSearch] = useState('');
+  const [clientSearch, setClientSearch] = useState(''); // filtre du sélecteur client (nom + tél)
   const [selectedClient, setSelectedClient] = useState<Client | null>(null);
+
+  // ── Filtre du sélecteur client (nom OU téléphone) ──────────────────────────
+  // Normalisation insensible à la casse ET aux accents (é→e, ç→c…).
+  // Match « contient » n'importe où → « ahmed » trouve « Ahmed Alami » ET « Alami Ahmed ».
+  const normalize = (s: string) =>
+    (s || '').toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
+  const clientQuery = normalize(clientSearch.trim());
+  const filteredClients: Client[] = clientQuery
+    ? clients.filter(
+        (c) =>
+          normalize(c.name).includes(clientQuery) ||
+          normalize(c.phone).includes(clientQuery),
+      )
+    : clients;
   const [cart, setCart] = useState<CartItem[]>([]);
   const [discountGlobal, setDiscountGlobal] = useState(0);
   const [operationType, setOperationType] = useState<'vente' | 'achat'>('vente');
@@ -1229,38 +1244,57 @@ export default function Cashier({ profile }: CashierProps) {
                     </p>
                   </div>
                   {operationType === 'vente' ? (
-                    <div className="flex gap-2">
-                      <select
-                        className={cn(
-                          'flex-1 bg-slate-50 rounded-xl py-2.5 px-3 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-emerald-500/20 border-2',
-                          // B13a : tant qu'aucun choix explicite n'est fait, le champ est marqué
-                          !selectedClient ? 'border-rose-300' : 'border-slate-200'
-                        )}
-                        value={selectedClient?.id || ''}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          if (v === COMPTOIR_ID) {
-                            setSelectedClient({
-                              id: COMPTOIR_ID, name: 'Client Comptoir', phone: '', address: '',
-                              function: '', createdAt: new Date() as any, updatedAt: new Date() as any,
-                            } as Client);
-                          } else {
-                            setSelectedClient(clients.find((c) => c.id === v) || null);
-                          }
-                        }}
-                      >
-                        <option value="" disabled>— Sélectionner un client (obligatoire) —</option>
-                        <option value={COMPTOIR_ID}>Client Comptoir</option>
-                        {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => setShowQuickClient(true)}
-                        className="p-2.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl transition-all shrink-0"
-                        title="Nouveau client"
-                      >
-                        <Plus className="h-4 w-4" />
-                      </button>
+                    <div className="space-y-2">
+                      {/* Filtre temps réel : nom OU téléphone, insensible casse + accents */}
+                      <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={clientSearch}
+                          onChange={(e) => setClientSearch(e.target.value)}
+                          placeholder="Rechercher un client (nom ou téléphone)…"
+                          className="w-full bg-white border-2 border-slate-200 rounded-xl py-2 pl-9 pr-3 text-sm font-semibold text-slate-700 placeholder:font-normal placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-300 outline-none"
+                        />
+                      </div>
+                      <div className="flex gap-2">
+                        <select
+                          className={cn(
+                            'flex-1 bg-slate-50 rounded-xl py-2.5 px-3 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-emerald-500/20 border-2',
+                            // B13a : tant qu'aucun choix explicite n'est fait, le champ est marqué
+                            !selectedClient ? 'border-rose-300' : 'border-slate-200'
+                          )}
+                          value={selectedClient?.id || ''}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (v === COMPTOIR_ID) {
+                              setSelectedClient({
+                                id: COMPTOIR_ID, name: 'Client Comptoir', phone: '', address: '',
+                                function: '', createdAt: new Date() as any, updatedAt: new Date() as any,
+                              } as Client);
+                            } else {
+                              setSelectedClient(clients.find((c) => c.id === v) || null);
+                            }
+                          }}
+                        >
+                          <option value="" disabled>— Sélectionner un client (obligatoire) —</option>
+                          {/* « Client Comptoir » toujours accessible, jamais masqué par le filtre */}
+                          <option value={COMPTOIR_ID}>Client Comptoir</option>
+                          {filteredClients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => setShowQuickClient(true)}
+                          className="p-2.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl transition-all shrink-0"
+                          title="Nouveau client"
+                        >
+                          <Plus className="h-4 w-4" />
+                        </button>
+                      </div>
+                      {clientQuery && filteredClients.length === 0 && (
+                        <p className="text-xs font-semibold text-slate-400 pl-1">
+                          Aucun client trouvé — « Client Comptoir » reste disponible.
+                        </p>
+                      )}
                     </div>
                   ) : (
                     <div className="flex gap-2">
